@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather DAILY LOG ROTATION — one-shot scheduled job. gzip-archives logs/*.log and
+  rotates oversized (>50MB) data/*.jsonl so unbounded growth can't fill the disk and crash
+  the KeepAlive daemon. Must be loaded before go-live.
+      cp deploy/com.polyweather.logrotate.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.logrotate.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.logrotate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/maintenance/maintenance.sh</string>
+        <string>logrotate</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/wekoiuk/polyweather</string>
+    <key>RunAtLoad</key><false/>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>10</integer></dict>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

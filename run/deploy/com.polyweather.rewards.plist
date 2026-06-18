@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather reward FARMER 24/7 — macOS launchd agent. SEPARATE process + state (reward_state.json) from the
+  directional daemon, so a farmer bug can never touch the main bot. Runs the continuous farm loop: passive
+  maker bids on TOMORROW+ temperature reward buckets, Stage-2 scalp/flatten on fills. LIVE iff .env has
+  POLY_DRY_RUN=0 (the same switch as the daemon).
+
+  Install (per-user; runs while the Mac mini is logged in / awake):
+      # STOP any foreground farmer first (Ctrl-C) — two farmers would fight over reward_state.json.
+      cp run/deploy/com.polyweather.rewards.plist ~/Library/LaunchAgents/
+      launchctl load   ~/Library/LaunchAgents/com.polyweather.rewards.plist   # start + run at login
+      launchctl unload ~/Library/LaunchAgents/com.polyweather.rewards.plist   # stop
+      launchctl list | grep polyweather                                       # status
+  Logs: logs/rewards.out.log (cycles / PLACED / SELL) + logs/rewards.err.log.
+  EDIT the two absolute paths below if the repo is not at /Users/wekoiuk/polyweather.
+  Tune --cap / --max / --interval in run/deploy/run_rewards.sh (then unload + load to apply).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyweather.rewards</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/run_rewards.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wekoiuk/polyweather</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/rewards.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/rewards.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

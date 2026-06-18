@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather DAILY BACKUP — one-shot scheduled job (NOT a KeepAlive daemon).
+  Archives data/ (odds/orders/decisions/obs are irreplaceable — Gamma keeps no history).
+  Set POLY_BACKUP_DEST in .env for off-site (rclone:remote:bucket  OR  user@host:/path).
+      cp deploy/com.polyweather.backup.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.backup.plist
+  Edit the absolute paths if the repo is not at /Users/wekoiuk/polyweather.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/maintenance/maintenance.sh</string>
+        <string>backup</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/wekoiuk/polyweather</string>
+    <key>RunAtLoad</key><false/>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

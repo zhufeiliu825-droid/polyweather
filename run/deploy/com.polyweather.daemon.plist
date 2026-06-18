@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather 24/7 daemon — macOS launchd agent.
+  Install (per-user, runs while the Mac mini is logged in / awake):
+      cp deploy/com.polyweather.daemon.plist ~/Library/LaunchAgents/
+      launchctl load  ~/Library/LaunchAgents/com.polyweather.daemon.plist   # start + run at login
+      launchctl unload ~/Library/LaunchAgents/com.polyweather.daemon.plist  # stop
+      launchctl list | grep polyweather                                     # status
+  Logs: logs/daemon.out.log (stdout: scans/digests/decisions) + logs/daemon.err.log.
+  EDIT the two absolute paths below if the repo is not at /Users/wekoiuk/polyweather.
+  NOTE: to survive logout/reboot-without-login, install as a LaunchDaemon in
+  /Library/LaunchDaemons (root) instead; for a single-user always-on Mac mini this
+  LaunchAgent + "never sleep" (System Settings > Energy) is the simplest robust setup.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyweather.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wekoiuk/polyweather</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/daemon.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/daemon.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

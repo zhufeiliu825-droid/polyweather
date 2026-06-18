@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather DAILY SETTLEMENT CAPTURE — one-shot scheduled job. Records each resolved event's
+  winning bucket + AWC actual max + (if we bet) won?/paper-or-real P&L → data/settle.jsonl.
+  The 复盘 ground truth, saved locally for offline analysis (Claude + user). Runs late UTC so the
+  prior local day has resolved across all time zones.
+      cp deploy/com.polyweather.settle.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.settle.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.settle</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/maintenance/maintenance.sh</string>
+        <string>settle</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/wekoiuk/polyweather</string>
+    <key>RunAtLoad</key><false/>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>30</integer></dict>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

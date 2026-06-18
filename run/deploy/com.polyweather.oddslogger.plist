@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather ODDS LOGGER — macOS launchd agent (read-only, no creds; safe to run NOW).
+  Captures forward odds history that Gamma does not keep — the foundation for ever
+  validating the edge. Independent of the trading daemon; start it first.
+      cp deploy/com.polyweather.oddslogger.plist ~/Library/LaunchAgents/
+      launchctl load  ~/Library/LaunchAgents/com.polyweather.oddslogger.plist
+      launchctl unload ~/Library/LaunchAgents/com.polyweather.oddslogger.plist
+  Logs: logs/odds.out.log / logs/odds.err.log.  Output: data/odds_log.jsonl.
+  EDIT the absolute paths below if the repo is not at /Users/wekoiuk/polyweather.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyweather.oddslogger</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/run_odds.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wekoiuk/polyweather</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/odds.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/odds.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

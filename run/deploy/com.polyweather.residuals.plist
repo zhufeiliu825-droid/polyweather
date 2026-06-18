@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather DAILY FORECAST-RESIDUALS — one-shot scheduled job. Rebuilds the rolling forecast−actual
+  bias (Open-Meteo historical-forecast vs AWC METAR max, last ~30d) → data/forecast_residuals.jsonl,
+  the decision agent's recent-bias REFERENCE. Runs daily after settle so the prior day is included; the
+  rolling window is forgiving so the exact minute isn't critical.
+      cp deploy/com.polyweather.residuals.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.residuals.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.residuals</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/maintenance/maintenance.sh</string>
+        <string>residuals</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/wekoiuk/polyweather</string>
+    <key>RunAtLoad</key><false/>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>30</integer></dict>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

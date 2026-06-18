@@ -1,0 +1,21 @@
+# Per-city mapping from a Polymarket daily-temperature event to its physical
+# resolution at Weather Underground. This is the single source of resolution
+# truth. Only cities marked verified=true emit edge signals; others (once added)
+# are price-monitored only until verify_city confirms station/unit/tz.
+
+[defaults]
+wu_api_key = "6532d6454b8aa370768e63d6ba5a832e"  # WU public web key (browser key, not a user credential)
+temp_tag_id = 104596                              # Gamma tag "Highest temperature"
+
+[cities.london]
+wu_station   = "EGLC"            # London City Airport (verified resolution station)
+country_code = "GB"
+location_key = "EGLC:9:GB"       # WU api.weather.com location id
+latitude     = 51.505            # EGLC coords (for forecast)
+longitude    = 0.055
+timezone     = "Europe/London"   # local clock day window (BST in summer)
+unit         = "C"               # market resolution unit: "C" | "F"
+pm_ticker    = "london-daily-weather"
+series_id    = 10006             # Gamma series id (cheap per-city event fetch)
+tier         = "watchlist"       # watchlist (WS) | breadth (poll)
+verified     = true

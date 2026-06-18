@@ -1,0 +1,33 @@
+# Edge-signal thresholds. Every fired signal records the threshold values it was
+# evaluated under, so backtests are reproducible.
+
+[thresholds]
+dead_bucket_min_price   = 0.02    # fire DEAD_BUCKET if a fair-0 bucket trades >= this
+locked_cumulative_gap   = 0.03    # fire LOCKED if 1 - sum(p of {winner & above}) >= this
+locked_single_max_price = 0.95    # EOD: fire if current-max bucket trades <= this
+min_liquidity           = 5000.0  # suppress signals below this event liquidity ($)
+devig_sum_lo            = 0.9     # raw price-sum sanity band (else -> data-quality, not edge)
+devig_sum_hi            = 1.15
+wu_staleness_sec        = 1200    # realized-max must be fresher than this to trust dead buckets
+
+[upside]
+peak_hour_end   = 18              # fallback fixed lock hour (used only if conditions layer off)
+upside_edge_min = 0.10            # fire UPSIDE if |forecast_p - market_p| >= this
+sigma_floor     = 0.5             # min forecast-error std (degrees)
+bias_days       = 7               # days of forecast-vs-METAR residuals for bias/sigma fit
+
+[conditions]
+use_conditions         = true     # master switch for the solar/cloud/rain layer
+lock_floor_hour        = 16       # never declare "peak passed" before this local hour
+lag_min_h              = 2.0
+lag_max_h              = 4.5
+peak_halfwidth_h       = 1.5
+peak_cloud_widen_h     = 1.0
+peak_cloud_widen_pct   = 70
+rain_cap_mm            = 0.5
+cloud_overcast_pct     = 75
+cloud_std_showery      = 25
+precip_prob_showery    = 40
+precip_prob_convective = 60
+shrinkage_k            = 8
+fit_days               = 90

@@ -212,7 +212,7 @@ The audit found that **local patches to this state machine keep introducing new 
 
 The workspace was initialized as a Git repository on `main` on 2026-06-19. The baseline snapshot includes
 source, tests, deployment scripts, configuration, docs and archived code. `.env`, `data/`, `logs/`, virtual
-environments, local tool settings/caches, `.DS_Store` and `*.bak` are ignored. There is currently no configured
-remote, so the Git commit is a local versioned snapshot rather than an off-machine backup.
+environments, local tool settings/caches, `.DS_Store` and `*.bak` are ignored. It is backed up to the PRIVATE
+repository `https://github.com/zhufeiliu825-droid/polyweather`; local `main` tracks `origin/main`.
 
 **Keep this `HANDOFF.md` synchronized after every behavior, deployment, configuration-contract, or unresolved-risk change.**

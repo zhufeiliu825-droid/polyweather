@@ -6,7 +6,10 @@ positive — exactly the seasonal drift the operator wanted captured live.
 
 This is the recent / rolling / SOFT successor to the retired build_calib (which fit a STALE annual σ and
 HARD-gated the bucket). Run daily (rolling, idempotent — rewrites data/forecast_residuals.jsonl):
-  forecast = Open-Meteo historical-forecast-api (FREE, 30 d of daily peaks)
+  forecast = Open-Meteo historical-forecast-api (FREE, 30 d of daily peaks). This API stitches the first
+             hours of successive model runs, so the residual is a recent near-analysis station/regime bias,
+             NOT a fixed 12h/24h issue-time forecast error. Use Previous Runs, Single Runs, or our persisted
+             issue-time snapshots for strict lead-time ML training/backtests.
   actual   = IEM archived METAR integer max (same parse+round+clamp as the live AWC running_max). IEM is used
              because AWC caps long responses at ~400 reports, truncating the oldest local day at 30-min stations.
 

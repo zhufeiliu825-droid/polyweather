@@ -215,6 +215,26 @@ The audit found that **local patches to this state machine keep introducing new 
 - The directional bot's fill test that the co-hold could mis-attribute: `run/run_daemon.py` (search `sz`). Worth understanding for §4.1.
 - Calibration: `data/forecast_residuals.jsonl` (per-station forecast−actual residuals; drives both the EV gate and the directional bot).
 
+### 8.1 Temperature ML research (2026-06-19)
+
+The proposed next-temperature model is feasible, but the recommended production target is a probabilistic,
+multi-horizon **residual model on top of NWP**, including a daily-max distribution and integer-bucket
+probabilities. Do not start with a local-only autoregressive replacement for NWP: it cannot see upstream fronts
+and optimizes the wrong objective for a daily-high market.
+
+The full design, data schema, leakage controls, evaluation gates and staged implementation are documented in
+`docs/temperature_ml_research.md`. Local inventory at research time: 4,372 METAR rows across 32 stations
+(EGLC about 20 days, most stations 2-3 days), 960 daily residual rows, and 2,404 issue-time forecast snapshots
+across 110 station/day files. This is enough to validate a pipeline, not to fit a production sequence model;
+backfill at least two years and target five years.
+
+**Important calibration caveat:** `maintain/build_residuals.py` currently uses Open-Meteo Historical Forecast,
+which stitches the first hours of successive model runs. Those 30-day residuals remain useful as a recent
+near-analysis station/regime bias reference, but they are not a strict 12h/24h live-forecast error distribution.
+ML training and promotion must use issue-time-aligned Previous Runs, Single Runs, or our own snapshots, split
+chronologically by whole day. Keep the initial model in read-only shadow mode for at least 30 days; it must never
+control the order state machine directly.
+
 ## 9. Git backup status
 
 The workspace was initialized as a Git repository on `main` on 2026-06-19. The baseline snapshot includes

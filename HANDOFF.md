@@ -15,18 +15,24 @@ _Written 2026-06-18; synchronized 2026-06-19 by Codex after the hourly Farmer LL
 > 4. Live launcher raised to **`--cap 200 --max 20`** (farmer); `run_rewards.py` defaults + this doc synced.
 > Both bots' sizing keeps the $1 platform minimum AND the farmer's reward-eligibility minimum via explicit `max(…, floor)` guards + tests.
 
+> **Claude 2026-06-19 change A — Farmer LEAD-MATCHED σ (NOT live until farmer restart):** the near-analysis σ (`forecast_residuals.jsonl`, lead≈0) is far too tight for the 24–48h lead the Farmer actually bets at (London σ 0.5 vs true 1.2 — measured on 2.4 yr). Fix: `residuals.fair_calibration(station, regime, lead_days=N)` swaps in the honest FIXED-lead σ from `data/leadtime_residuals.jsonl` (`leadtime_sigma()`), taking the **max** of near-analysis vs leadtime σ so it's NEVER *tighter* than before (model-mismatch cities Seoul/Tokyo keep their wider best_match σ); **bias unchanged** (matches the live best_match source). `scan.py` maps `hours_to_peak`→lead (12–36h→d1, ≥36h→d2). **Farmer only** — the main bot's near-peak short lead keeps near-analysis σ; its lever is a future nowcast track. Data built by `maintain/build_leadtime_dataset.py` (Open-Meteo **Previous Runs** ECMWF `temperature_2m_previous_dayN` + met-at-lead, joined to IEM METAR max — the SAME truth as build_residuals), refreshed **weekly** by `maintenance.sh leadtime` + `com.polyweather.leadtime.plist` (rolling 24 mo, atomic-swap). A generative-MOS (quantile gradient-boosting, recency + σ-calibrated) was built + ruler-tested (`maintain/eval_leadtime.py`, `train_mos.py`) → **at parity** with the lead-matched calibration (24h tie, 48h +1.2%) → **shelved** (sklearn in dev-deps only; tooling kept for re-runs).
+
+> **⚠️ STRATEGIC PRIORITY (user, 2026-06-19) — read first.** The **directional (main) bot's win rate is the durable mission.** The Farmer's only income is Polymarket **liquidity rewards** — a *recent* platform policy that can be cut or removed at any time; **if rewards end, the Farmer has no reason to run.** So the primary, lasting investment is the **main bot's forecast edge / win rate** (calibration, lead-time-correct MOS, regime σ). Keep the Farmer running and safe, but **weigh any heavy Farmer-only work (e.g. the separate-funder root fix, §4.1) against the risk that the rewards policy disappears first.** This reframes §0 below: where it says "the Farmer is your focus," the *durable* priority is the main bot.
+
 ---
 
 ## 0. TL;DR — what you're inheriting and what to do
 
 `polyweather` runs **two** LIVE real-money Polymarket bots on a 24/7 Mac mini:
 1. **Directional daemon** — bets the daily-high-temperature buckets near each city's forecast peak (the main strategy; mostly out of scope for you).
-2. **Reward farmer** — `src/polyweather/rewards/` — rests passive maker bids on temperature reward buckets to earn Polymarket **liquidity rewards** (paid for RESTING in-band, not for filling). **This is your focus.**
+2. **Reward farmer** — `src/polyweather/rewards/` — rests passive maker bids on temperature reward buckets to earn Polymarket **liquidity rewards** (paid for RESTING in-band, not for filling). **This is your near-term focus** (durable priority = main bot win rate — see the Strategic Priority note up top).
 
 The Farmer is LIVE under `com.polyweather.rewards`; the hourly adviser was loaded and verified on 2026-06-18
 22:52Z. The first batch returned 35 valid records for 36 events (33 participate, 2 skip); subsequent 5-minute
 cycles reused the cache. Existing resting/filled state is refreshed with current advice so a fill cannot snapshot
 an obsolete fair value.
+
+_Priority note: per the Strategic Priority callout above, the main bot's win rate outranks every Farmer item below — keep the Farmer safe, but don't spend the full 2 days here if the rewards policy looks shaky._
 
 **The audit's verdict (your main job): the design has ONE architectural root cause — a shared funder wallet — and patching it locally does not converge.** The user chose to **accept + monitor** for now (option 3). Your 2 days, roughly in priority order:
 1. **The root fix** — research + implement a separate funder wallet for the farmer ("option 1", §4.1), and/or harden the shared-funder accounting ("option 2", §4.2). This is the main thing.

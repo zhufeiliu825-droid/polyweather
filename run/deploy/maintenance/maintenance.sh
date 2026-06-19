@@ -4,6 +4,7 @@
 #     maintenance.sh backup        # daily 02:00 — archive data/ (irreplaceable) + optional off-site
 #     maintenance.sh logrotate     # daily 00:10 — gzip text logs + rotate oversized JSONL
 #     maintenance.sh residuals     # daily (pre-trading) — rolling forecast−actual bias → the agent's reference
+#     maintenance.sh leadtime      # weekly Sun 03:30 — rebuild FIXED-lead σ → the farmer's change-A calibration
 # Idempotent + safe to re-run. Each job logs to logs/maintenance.{out,err}.log via launchd.
 # (the monthly `calib` job was retired 2026-06-16 — no historical calibration in the live path.)
 set -euo pipefail
@@ -64,8 +65,19 @@ case "${1:-}" in
     echo "[residuals $(ts)] done"
     ;;
 
+  leadtime)
+    # FIXED-lead (Previous Runs ECMWF + IEM) residuals → the farmer's honest 24/48h σ (change A). σ is slow-
+    # moving, so weekly; rolling 24 mo bounds cost; build to a temp file then atomic-swap so a 5-min farmer
+    # cycle never reads a half-written file (residuals._leadtime_index reloads on the new mtime).
+    echo "[leadtime $(ts)] rebuilding fixed-lead residuals → data/leadtime_residuals.jsonl"
+    uv run python maintain/build_leadtime_dataset.py --out leadtime_residuals.tmp.jsonl \
+        --start "$(date -u -v-24m +%Y-%m-01)"
+    mv -f data/leadtime_residuals.tmp.jsonl data/leadtime_residuals.jsonl
+    echo "[leadtime $(ts)] done ($(wc -l < data/leadtime_residuals.jsonl) rows)"
+    ;;
+
   *)
-    echo "usage: maintenance.sh <backup|logrotate|settle|residuals>" >&2
+    echo "usage: maintenance.sh <backup|logrotate|settle|residuals|leadtime>" >&2
     exit 2
     ;;
 esac

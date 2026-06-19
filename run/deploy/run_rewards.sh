@@ -13,4 +13,4 @@ if [ -f .env ]; then
     . ./.env                                       # POLY_*, CLOB_* — never committed
     set +a
 fi
-exec uv run python run/run_rewards.py --farm-loop --cap 100 --max 10 --interval 5
+exec uv run python run/run_rewards.py --farm-loop --cap 200 --max 20 --interval 5

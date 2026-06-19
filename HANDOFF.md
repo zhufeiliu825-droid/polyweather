@@ -8,6 +8,13 @@ _Written 2026-06-18; synchronized 2026-06-19 by Codex after the hourly Farmer LL
 > 3h and is rejected on regime change or >1.5°C forecast drift; deterministic station/regime calibration is the
 > fallback. New BUYs still require `fair_yes - bid >= 3¢`; force-flat remains **peak−6h**.
 
+> **Claude 2026-06-19 calibration + sizing pass (NOT live until BOTH bots restart):**
+> 1. **`fair_calibration` σ** is now **regime-conditioned + globally ×1.10** — validated by a walk-forward ruler over the 960 residuals (overall std(z) 1.11→1.02; rainy 1.36→1.21; mixed 1.12→1.02). The deterministic fallback σ is now honest per weather regime. New `residuals.fair_calibration` keys: `station_sigma`, `regime_sigma`.
+> 2. **Conviction position sizing on BOTH bots** (size by edge÷σ): **Farmer** `size = rewardsMinSize × clamp(edge/(0.03·σ),1,3)` (`_conviction_mult`, `MAX_SIZE_MULT=3`), hard-floored at the reward min so a bid never loses reward eligibility. **Main bot** (`analyze._conviction_size`) `size = base × clamp(confidence × edge/(0.03·σ),1,3)` = **10–30 sh**, hard-floored at the already-$1-cleared base (sub-10¢ buckets keep their sized-up share count); only ever UP, and never when the calibration disagrees (edge≤0). `CONVICTION_MAX_MULT=3`, `CONVICTION_REF_EDGE=0.03` (top of `analyze.py`).
+> 3. **Main bot agent context** gains **`model_p`** per bucket (our calibrated P(YES)) as a SOFT reference next to market `mkt` — the LLM still chooses.
+> 4. Live launcher raised to **`--cap 200 --max 20`** (farmer); `run_rewards.py` defaults + this doc synced.
+> Both bots' sizing keeps the $1 platform minimum AND the farmer's reward-eligibility minimum via explicit `max(…, floor)` guards + tests.
+
 ---
 
 ## 0. TL;DR — what you're inheriting and what to do
@@ -77,7 +84,7 @@ FILLED tokens remain in scan context so fair/maker SELL management continues aft
 uv run pytest -q                          # full suite (must stay green)
 uvx ruff check src/ tests/ run/           # lint (must stay clean)
 POLY_DRY_RUN=1 uv run python run/run_rewards.py --scan-once --top 10
-POLY_DRY_RUN=1 uv run python run/run_rewards.py --farm-dry --cap 100 --max 10
+POLY_DRY_RUN=1 uv run python run/run_rewards.py --farm-dry --cap 200 --max 20
 ```
 `plan_cycle` is a PURE function — unit-test new logic against it directly (see the existing tests for the `_filled(...)`, `_order(...)`, `_held(...)`, `_t(...)` helpers). Prefer pure-function tests over live calls.
 
@@ -132,7 +139,7 @@ compare alternatives, but changing this requires another explicit user decision:
 
 ### 4.4 Other research the user would value
 - **Positive-edge validation:** the fair-value model (`residuals.bucket_fair_yes`) uses per-station residual σ/bias. Validate it against held-out residuals; is the new 3¢ `MIN_MODEL_EDGE` enough after model error? (Calibration fact: for `==N` buckets, P(round(actual)==N) is only ~24% even when the forecast peak rounds to N.)
-- **Reward yield:** are we farming the best buckets? Competition vs pool analysis from the scan logs. Is `--cap 100 --max 10` optimal?
+- **Reward yield:** are we farming the best buckets? Competition vs pool analysis from the scan logs. Is `--cap 200 --max 20` optimal?
 
 ### 4.5 Hourly LLM calibration adviser — COMPLETED / LIVE
 

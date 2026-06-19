@@ -152,8 +152,8 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="with --farm-loop: run a single cycle then exit")
     ap.add_argument("--interval", type=int, default=5, help="with --farm-loop: minutes between cycles")
     ap.add_argument("--top", type=int, default=25)
-    ap.add_argument("--cap", type=float, default=50.0, help="capital cap (USDC)")
-    ap.add_argument("--max", type=int, default=10, dest="max_targets", help="max buckets to farm")
+    ap.add_argument("--cap", type=float, default=200.0, help="capital cap (USDC) — matches the live launcher")
+    ap.add_argument("--max", type=int, default=20, dest="max_targets", help="max buckets to farm — matches the live launcher")
     a = ap.parse_args()
     if a.cancel_all:
         asyncio.run(cancel_all())

@@ -17,7 +17,10 @@ FAIR_MIN_N = 8         # need this many residuals for a per-station sigma; else 
 SIGMA_FLOOR = 0.5      # never trust a tighter error than this — a small sample looks falsely over-confident
 FAIR_WINDOW = 30       # use the last N residuals for the fair-value sigma/bias (recent ≈ seasonal)
 REGIME_MIN_N = 4       # fewer matching days are shown to the AI but never drive the farmer's hard fair value
-REGIME_PRIOR_N = 6     # shrink conditional bias toward the all-weather station mean
+REGIME_PRIOR_N = 6     # shrink conditional bias/sigma toward the all-weather station mean
+REGIME_SIGMA_MIN_N = 6  # a regime-conditional STD needs more samples than a regime mean before we trust it
+SIGMA_INFLATE = 1.10   # walk-forward backtest (2026-06-18, 704 OOS preds): in-sample residual std under-covers
+#                        next-day error by ~10% (std(z)=1.10); inflate so the bucket probabilities stay honest
 
 
 def _load(station: str) -> list[dict]:
@@ -99,22 +102,26 @@ def fair_calibration(station: str, *, regime: str | None = None,
         return None
     xs = [float(r["residual"]) for r in rows]
     station_bias = statistics.mean(xs)
-    if len(xs) >= FAIR_MIN_N:
-        sigma = max(statistics.stdev(xs), SIGMA_FLOOR)
-    else:
-        sigma = POOLED_SIGMA
+    station_sigma = max(statistics.stdev(xs), SIGMA_FLOOR) if len(xs) >= FAIR_MIN_N else POOLED_SIGMA
 
-    matched = [r for r in rows if regime and r.get("regime") == regime]
-    bias, source, weight = station_bias, "station", 0.0
-    regime_bias = statistics.mean(float(r["residual"]) for r in matched) if matched else None
+    matched = [float(r["residual"]) for r in rows if regime and r.get("regime") == regime]
+    bias, sigma, source, weight = station_bias, station_sigma, "station", 0.0
+    regime_bias = statistics.mean(matched) if matched else None
+    regime_sigma = None
     if len(matched) >= REGIME_MIN_N and regime_bias is not None:
-        weight = len(matched) / (len(matched) + REGIME_PRIOR_N)
+        weight = len(matched) / (len(matched) + REGIME_PRIOR_N)        # more matching days → trust the regime more
         bias = weight * regime_bias + (1.0 - weight) * station_bias
         source = "regime_shrunk"
+        if len(matched) >= REGIME_SIGMA_MIN_N:                          # also tighten clear/cloudy & WIDEN rainy/mixed
+            regime_sigma = max(statistics.stdev(matched), SIGMA_FLOOR)  # (walk-forward: all-weather σ runs too tight on rainy)
+            sigma = weight * regime_sigma + (1.0 - weight) * station_sigma
+    sigma = sigma * SIGMA_INFLATE                                       # correct the ~10% next-day under-coverage
     return {"sigma": round(sigma, 3), "bias": round(bias, 3), "source": source,
             "station_n": len(rows), "station_bias": round(station_bias, 3),
+            "station_sigma": round(station_sigma, 3),
             "regime": regime, "regime_n": len(matched),
             "regime_bias": (round(regime_bias, 3) if regime_bias is not None else None),
+            "regime_sigma": (round(regime_sigma, 3) if regime_sigma is not None else None),
             "regime_weight": round(weight, 3)}
 
 

@@ -70,19 +70,19 @@ def test_fair_calibration_none_without_data(tmp_path, monkeypatch):
 
 
 def test_fair_calibration_thin_sample_uses_pooled_sigma(tmp_path, monkeypatch):
-    # < FAIR_MIN_N rows → bias from the mean, sigma = POOLED_SIGMA (don't trust a tiny-sample std)
+    # < FAIR_MIN_N rows → bias from the mean, sigma = POOLED_SIGMA × the global inflation (don't trust a tiny-sample std)
     _write(tmp_path, monkeypatch, [{"station": "EGLC", "date": f"2026-06-1{d}", "residual": 1.0} for d in range(3)])
     calibration = R.fair_calibration("EGLC")
-    assert calibration["sigma"] == R.POOLED_SIGMA and abs(calibration["bias"] - 1.0) < 1e-9
+    assert abs(calibration["sigma"] - R.POOLED_SIGMA * R.SIGMA_INFLATE) < 1e-9 and abs(calibration["bias"] - 1.0) < 1e-9
 
 
 def test_fair_calibration_uses_station_std_when_enough(tmp_path, monkeypatch):
-    # ≥ FAIR_MIN_N rows alternating ±1 → mean 0, std 1.0 (> SIGMA_FLOOR) → its own sigma
+    # ≥ FAIR_MIN_N rows alternating ±1 → mean 0, std ~1.04 → its own sigma × the global ~1.10 inflation
     rows = [{"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (1.0 if d % 2 else -1.0)} for d in range(1, 13)]
     _write(tmp_path, monkeypatch, rows)
     calibration = R.fair_calibration("EGLC")
     assert abs(calibration["bias"]) < 1e-9
-    assert 1.0 < calibration["sigma"] < 1.1 and calibration["sigma"] != R.POOLED_SIGMA
+    assert 1.10 < calibration["sigma"] < 1.20 and calibration["sigma"] != R.POOLED_SIGMA
 
 
 def test_regime_calibration_is_shrunk_and_requires_minimum_sample(tmp_path, monkeypatch):
@@ -97,6 +97,19 @@ def test_regime_calibration_is_shrunk_and_requires_minimum_sample(tmp_path, monk
 
     thin = R.fair_calibration("RKSI", regime="mixed")
     assert thin["source"] == "station" and thin["regime_n"] == 0
+
+
+def test_regime_sigma_widens_a_noisy_regime(tmp_path, monkeypatch):
+    # ≥ REGIME_SIGMA_MIN_N spread-out 'rainy' rows + tight all-station context → the rainy σ is conditioned
+    # (shrunk toward the station σ) and reflects rainy's bigger spread, not just the all-weather number.
+    rows = ([{"station": "RKSI", "date": f"2026-05-{d:02d}", "residual": (0.2 if d % 2 else -0.2), "regime": "clear"}
+             for d in range(1, 13)]
+            + [{"station": "RKSI", "date": f"2026-06-{d:02d}", "residual": (3.0 if d % 2 else -3.0), "regime": "rainy"}
+               for d in range(1, 9)])
+    _write(tmp_path, monkeypatch, rows)
+    rainy = R.fair_calibration("RKSI", regime="rainy")
+    assert rainy["regime_sigma"] is not None and rainy["regime_n"] == 8
+    assert rainy["sigma"] > rainy["station_sigma"]            # the noisy regime widens σ above the all-weather scale
 
 
 def test_bucket_fair_yes_eq_is_low_at_peak():

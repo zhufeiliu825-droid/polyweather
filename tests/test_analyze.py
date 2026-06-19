@@ -254,3 +254,49 @@ def test_final_momentum_check_fails_closed_when_unavailable(monkeypatch):
     allowed, m = asyncio.run(A.enforce_order_momentum(None, d, _MNOW))
     assert allowed is False and d.action == "ESCALATE"
     assert m["reason"] == "thin_history" and "unavailable" in d.reason
+
+
+def _conv_dec(**over):
+    base = dict(city="seoul", station_id="RKSI", local_date=date(2026, 6, 19), label=">=30C",
+                comparator=Comparator.GE, threshold=30, confidence=0.8,
+                market_yes=0.50, maker_price=0.50, size_shares=10.0, action="BET")
+    base.update(over)
+    return Decision(**base)
+
+
+def test_conviction_sizes_up_confident_cheap_bet(monkeypatch):
+    # forecast peak 32 → >=30 is ~certain (fair ~0.99); huge edge × conf 0.8 → cap at 3× → 30 shares
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: {"bias": 0.0, "sigma": 1.0})
+    assert A._conviction_size(_conv_dec(), forecast_peak=32.0, regime="clear") == 30.0
+
+
+def test_conviction_keeps_base_when_model_disagrees(monkeypatch):
+    # price 0.70 above our fair (~0.69) → edge ≤ 0 → never upsize a model-rich bet → base 10
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: {"bias": 0.0, "sigma": 1.0})
+    assert A._conviction_size(_conv_dec(maker_price=0.70), forecast_peak=30.0, regime="clear") == 10.0
+
+
+def test_conviction_keeps_base_without_confidence_or_calibration(monkeypatch):
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: {"bias": 0.0, "sigma": 1.0})
+    assert A._conviction_size(_conv_dec(confidence=None), forecast_peak=32.0, regime="clear") == 10.0
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: None)
+    assert A._conviction_size(_conv_dec(), forecast_peak=32.0, regime="clear") == 10.0
+
+
+def test_conviction_keeps_dollar_cleared_base_for_cheap_bucket(monkeypatch):
+    # a sub-10¢ bucket's base is already $1-cleared (e.g. 17 sh ≈ $1); a model-rich bet (edge≤0) must keep 17,
+    # never collapse to a sub-$1 size — the $1 platform minimum holds through conviction sizing
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: {"bias": 0.0, "sigma": 2.0})
+    d = _conv_dec(maker_price=0.80, size_shares=17.0)        # GE30 @ peak30 → fair ~0.60 < 0.80 → edge ≤ 0 → no upsize
+    assert A._conviction_size(d, forecast_peak=30.0, regime="clear") == 17.0
+
+
+def test_ladder_annotates_model_p(monkeypatch):
+    # each market-ladder row gets model_p = calibrated P(bucket); a soft reference vs market mkt
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: {"bias": 0.0, "sigma": 1.0})
+    ladder = [{"b": ">=30", "mkt": 0.5, "alive": True}, {"b": "==25", "mkt": 0.2, "alive": True}]
+    out = A._ladder_with_model_p(ladder, "RKSI", peak=32.0, regime="clear")
+    assert out[0]["model_p"] > 0.99 and 0.0 <= out[1]["model_p"] <= 1.0    # >=30 at peak 32 → ~certain
+    # no calibration → ladder left unannotated (graceful)
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: None)
+    assert "model_p" not in A._ladder_with_model_p([{"b": ">=30", "mkt": 0.5}], "RKSI", 32.0, "clear")[0]

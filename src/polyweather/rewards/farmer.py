@@ -36,6 +36,7 @@ TICK = 0.01                   # every farmed bucket is in [0.10,0.84] → the 0.
 REPRICE_DRIFT = 0.02          # reprice when the resting bid drifts > this from the live mid (score ≈31% at 2¢, ≈0 at the 4.5¢ band edge)
 UNDERCUT_C = 0.02             # bid this far below mid AND never above the best bid → a PASSIVE maker (sits in the band, doesn't jump near the ask = instant fill)
 MIN_MODEL_EDGE = 0.03          # only buy when calibrated fair P(YES) is at least 3¢ ABOVE our passive bid
+MAX_SIZE_MULT = 3.0            # conviction sizing: a bid grows up to this × the reward min when edge is big AND the forecast σ is tight; 1× (floor) when thin/noisy. Tunable — bigger = more concentration on the best bets, less reward-spread
 SELL_MARKUP_C = 0.02           # minimum take-profit; larger model edges target a larger gain below
 SELL_EDGE_CAPTURE = 0.50       # initially ask for half of the model edge
 SELL_MAX_MARKUP_C = 0.08       # do not wait for more than 8¢ of price improvement before recycling capital
@@ -106,6 +107,17 @@ def _has_positive_edge(t: dict, *, min_edge: float = MIN_MODEL_EDGE) -> bool:
     return edge is not None and edge >= min_edge - 1e-9
 
 
+def _conviction_mult(t: dict) -> float:
+    """Position-size multiplier in [1, MAX_SIZE_MULT]: BIGGER when our price edge is large AND the forecast σ is
+    tight (high conviction — a tight city / clear day), 1× (the reward floor) when the edge is thin OR the city/day
+    is noisy. No σ (no calibration) → 1× (never tilt on unknown). Normalized so (edge=MIN_MODEL_EDGE, σ=1°)→1×."""
+    edge = _model_edge(t)
+    sigma = (t.get("calibration") or {}).get("sigma")
+    if edge is None or not sigma:
+        return 1.0
+    return min(max(edge / (MIN_MODEL_EDGE * max(sigma, 0.1)), 1.0), MAX_SIZE_MULT)
+
+
 def select(targets: list[dict], *, capital_cap: float, max_targets: int, min_lean: float = MIN_LEAN,
            size_mult: float = 1.0, max_per_event: int = MAX_PER_EVENT) -> list[FarmOrder]:
     """Pick edge-aligned reward bids: HEALTHY book (real two-sided, de-vig ~1), in-band, CHEAP vs our
@@ -129,7 +141,8 @@ def select(targets: list[dict], *, capital_cap: float, max_targets: int, min_lea
     picks: list[FarmOrder] = []
     spent = 0.0
     for t in kept:
-        size = float(t["min_size"]) * size_mult
+        rmin = float(t["min_size"])                                                  # the market's rewardsMinSize
+        size = float(max(round(rmin * size_mult * _conviction_mult(t)), rmin))        # conviction sizing UP, but NEVER below rmin (else the bid earns no reward)
         price = _bid_price(t)                                                         # passive maker bid
         capital = round(size * price, 2)
         if spent + capital > capital_cap + 1e-9:                                      # over the cap → skip the next (cheaper) one

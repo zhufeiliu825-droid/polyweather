@@ -39,10 +39,58 @@ from ..models import Decision, EventState
 from ..realized.feature_store import DATA_DIR
 from ..realized.metar_parse import parse_metar
 from ..realized.metar_source import fetch_recent_awc
-from ..realized.residuals import recent_bias
+from ..realized.residuals import bucket_fair_yes, fair_calibration, recent_bias
 from ..realized.solar import day_sun
 
 GAMMA = "https://gamma-api.polymarket.com/events"
+
+# Main-bot conviction sizing — scale the FIXED bet size UP (never below) when our calibration AGREES with the
+# agent: bigger when the LLM is confident AND the calibrated edge (fair−price) is large AND the forecast σ tight.
+CONVICTION_MAX_MULT = 3.0       # bet ranges [base, 3×base] shares (user: 10→30); 1× when thin/unsure/model-disagrees
+CONVICTION_REF_EDGE = 0.03      # edge normalization: (edge=3¢, σ=1°, conf=1) → 1× (same scale as the farmer's gate)
+
+
+def _primary_regime(fan: dict | None) -> str | None:
+    """Peak-time weather regime ('clear'/'cloudy'/'rainy'/'mixed') from the freshest fan/forecast met."""
+    regime = (fan or {}).get("regime_latest") or classify_regime((fan or {}).get("met_at_peak_latest"))
+    return (regime or {}).get("primary")
+
+
+def _conviction_size(d: Decision, forecast_peak: float | None, regime: str | None) -> float:
+    """Conviction-scaled bet size = base × clamp(confidence × calibrated_edge ÷ σ, 1, CONVICTION_MAX_MULT). Only
+    ever UP from the base (floor 1×). Returns base unchanged when inputs are missing OR the calibration DISAGREES
+    (edge ≤ 0) — we never upsize a bet our own fair value calls rich. The agent still PICKS the bucket; this only
+    sizes it bigger when the model and the agent agree AND the forecast is reliable."""
+    base = d.size_shares
+    if forecast_peak is None or d.confidence is None or d.maker_price is None or d.threshold is None:
+        return base
+    cal = fair_calibration(d.station_id, regime=regime)
+    if not cal:
+        return base
+    fair = bucket_fair_yes(d.comparator.value, d.threshold, forecast_peak - cal["bias"], cal["sigma"])
+    edge = fair - d.maker_price
+    if edge <= 0:
+        return base
+    mult = min(max(d.confidence * edge / (CONVICTION_REF_EDGE * max(cal["sigma"], 0.1)), 1.0), CONVICTION_MAX_MULT)
+    return float(max(round(base * mult), base))   # NEVER below the base — it is already $1-cleared (sub-10¢ buckets size up)
+
+
+def _ladder_with_model_p(ladder: list[dict], station_id: str, peak: float | None, regime: str | None) -> list[dict]:
+    """Annotate each market-ladder row with `model_p` = our CALIBRATED P(this bucket resolves YES) from the
+    forecast peak + regime residuals (same fair value the farmer uses). A soft REFERENCE for the agent to weigh
+    against the market `mkt` — it still chooses. Left unannotated when there's no calibration/peak. Each row's
+    `b` is '{comparator}{threshold}' (e.g. '>=30', '==25', '<=-5')."""
+    cal = fair_calibration(station_id, regime=regime) if peak is not None else None
+    if not cal:
+        return ladder
+    mu = peak - cal["bias"]
+    for r in ladder:
+        b = str(r.get("b", ""))
+        try:
+            r["model_p"] = round(bucket_fair_yes(b[:2], int(b[2:]), mu, cal["sigma"]), 3)
+        except (ValueError, KeyError):
+            continue
+    return ladder
 CLOB_BOOKS = "https://clob.polymarket.com/books"   # live orderbook (the book we actually trade against)
 CLOB_PRICES_HISTORY = "https://clob.polymarket.com/prices-history"  # token price series → momentum (drawdown) check
 UTC = timezone.utc
@@ -406,6 +454,8 @@ async def analyze_city(client: httpx.AsyncClient, stn, now_utc: datetime,
         if proposal is not None and not proposal.get("_error"):
             decision = validate_proposal(proposal, state, tick.remaining, stn.station_id,
                                          now=now_utc, peak_utc=scan.peak_utc, cutoff_utc=cutoff_utc)
+            if decision is not None and decision.action == "BET":          # conviction sizing: calibration edge÷σ × LLM confidence
+                decision.size_shares = _conviction_size(decision, tick.remaining, _primary_regime(fan))
             decision_momentum = momentum
             if (decision is not None and decision.token_yes
                     and decision.token_yes != baseline.token_yes):
@@ -467,7 +517,9 @@ def _agent_context(stn, tick: "CityTick", baseline, scan: "Scan", momentum: dict
         "realized_running_max_C": tick.running_max,    # HARD floor — never bet a bucket below this
         "awc_fresh": tick.fresh,
         "forecast_curve_local": _forecast_curve(scan, tick.mkt_day),   # [HH:MM, °C] — peak sharpness/shape
-        "buckets": tick._dist(),                       # the market ladder you choose from: [{b, mkt, alive}]
+        "buckets": _ladder_with_model_p(tick._dist(), stn.station_id, tick.remaining, primary_regime),
+        "model_p_note": "model_p = our CALIBRATED P(bucket YES) from forecast peak + regime residuals — a soft "
+                        "reference vs the market `mkt`; you still choose (it is not a hard rule).",
         "recent_outcomes": _recent_outcomes(stn.station_id),   # this city's last ~5 settled days
         "recent_momentum": momentum or {},             # favorite's recent drawdown {window_min, drop_pct, is_big_drop}
         # MET (meteorologist context): the forecast atmosphere at the peak (fan.met_at_peak_latest) + the

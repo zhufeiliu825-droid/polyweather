@@ -221,6 +221,17 @@ Farmer 每 5 分钟复用该结果，和现有 hourly LLM cache 类似。安全�
 因此，这件事不是“等几年才开始”。历史数据可以立即回补，一到两周可以得到可信的第一轮离线答案；但
 让它影响真金白银下单，必须经过固定提前量回测和 shadow 观察。
 
+### 9.1 对抗复核后的优先级修正
+
+2026-06-19 与 Claude Desktop 做了对抗复核，双方同意：960 条 near-analysis residual 只能验证评估管线
+和描述偏差结构，不能证明 live lead-time ML 收益；文献中的改善百分比也不能外推成项目预期收益。
+
+Open-Meteo Previous Runs 已提供历史固定提前量数据，因此不必等待本地 snapshots 自然积累数月。第一项
+工作应提前为**只读 lead-time 校准审计**：用 `previous_day1/previous_day2` 重算 Farmer 实际 12-48h lead
+下的 bias、sigma、CRPS/Brier 和覆盖率。当前 Farmer 使用 near-analysis 残差估计长提前量不确定度，sigma
+可能偏小，从而让 `fair_yes` 过尖；这只是待验证风险，审计完成前不修改线上 sigma。Chronos/TimesFM
+延后到 nowcast benchmark，不进入 v1。
+
 ## 10. 研究来源
 
 - GraphCast：输入两个相隔 6h 的全球状态、自回归预测、0.25° 网格、227 个变量、用 1979-2017 ERA5
@@ -235,4 +246,3 @@ Farmer 每 5 分钟复用该结果，和现有 hourly LLM cache 类似。安全�
   [Historical Forecast API 文档](https://open-meteo.com/en/docs/historical-forecast-api)
 - 历史 METAR：仓库已通过 Iowa Environmental Mesonet ASOS archive 获取 routine/SPECI 原始报文；生产近期
   实况来自 NOAA Aviation Weather Center。训练数据需继续遵守各数据源许可和署名要求。
-

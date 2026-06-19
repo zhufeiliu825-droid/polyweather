@@ -235,6 +235,28 @@ ML training and promotion must use issue-time-aligned Previous Runs, Single Runs
 chronologically by whole day. Keep the initial model in read-only shadow mode for at least 30 days; it must never
 control the order state machine directly.
 
+### 8.2 Lead-time calibration risk (Claude/Codex review, 2026-06-19)
+
+An adversarial review with Claude Desktop confirmed the caveat above and surfaced a more immediate unresolved
+risk. The Farmer buys tomorrow+ markets at roughly 12-48h lead, while its current bias/sigma sample comes from
+Historical Forecast's stitched first-run hours (roughly near-analysis lead). Forecast error normally depends on
+lead, so the current Farmer sigma **may be too small**, producing over-sharp `fair_yes` and overconfident ranking
+or conviction sizing. This is a hypothesis to measure, not yet a finding. The main directional bot operates much
+closer to the peak and is probably less exposed to this mismatch.
+
+Do the read-only fixed-lead audit before ML-MOS or any further sizing rollout: backfill Open-Meteo Previous Runs
+`previous_day1`/`previous_day2`, align each sample to the Farmer's actual decision lead, join to settled METAR
+daily maxima, then compare bias, sigma, CRPS/Brier and interval coverage against the current calibration. Previous
+Runs provides historical fixed-lead data, so there is no need to wait months for new local snapshots; use the
+2,404 stored issue-time snapshots to cross-check API alignment. Do not change live sigma until the audit is
+complete, reviewed and explicitly approved.
+
+Review consensus: the existing 960 rows may validate the evaluation harness and describe near-analysis
+station/regime structure, but cannot establish live-lead LightGBM benefit. Defer Chronos/TimesFM to a later
+nowcast benchmark. Any candidate must beat both deterministic calibration and linear MOS on whole-day
+walk-forward Brier/log-loss with bootstrap uncertainty, cross-city/regime stability, calibration reliability and
+read-only shadow economic results; literature improvement percentages are priors, not expected project returns.
+
 ## 9. Git backup status
 
 The workspace was initialized as a Git repository on `main` on 2026-06-19. The baseline snapshot includes

@@ -10,6 +10,13 @@ def _write(tmp_path, monkeypatch, rows):
     monkeypatch.setattr(R, "RESIDUALS", p)
 
 
+def _write_leadtime(tmp_path, monkeypatch, rows):
+    p = tmp_path / "leadtime_residuals.jsonl"
+    p.write_text("".join(json.dumps(x) + "\n" for x in rows))
+    monkeypatch.setattr(R, "LEADTIME", p)
+    R._leadtime_index.cache_clear()   # cache is keyed on file mtime — drop it so the temp file is read
+
+
 def test_no_file_is_none(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "RESIDUALS", tmp_path / "nope.jsonl")
     assert R.recent_bias("EGLC") is None
@@ -125,3 +132,53 @@ def test_bucket_fair_yes_ge_and_le_complement():
 
 def test_bucket_fair_yes_ge_high_when_mu_above():
     assert R.bucket_fair_yes(">=", 27, mu=30.0, sigma=1.0) > 0.99      # expected max well above the threshold → near-certain YES
+
+
+# ---- change A: lead-matched σ (the farmer bets tomorrow+, where the near-analysis σ is far too tight) ----
+
+def test_leadtime_sigma_overrides_near_analysis_for_farmer(tmp_path, monkeypatch):
+    # near-analysis: TIGHT (±0.3) → small σ, bias 0; leadtime day1: WIDE (±1.5) → the honest 24h spread
+    _write(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (0.3 if d % 2 else -0.3)} for d in range(1, 13)])
+    _write_leadtime(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-05-{d:02d}", "lead_days": 1, "residual": (1.5 if d % 2 else -1.5)}
+        for d in range(1, 13)])
+    near = R.fair_calibration("EGLC")                       # no lead_days → near-analysis σ (main bot)
+    lead = R.fair_calibration("EGLC", lead_days=1)          # farmer path → honest fixed-lead σ
+    assert near["sigma_source"] == "near_analysis"
+    assert lead["sigma_source"] == "leadtime_d1"
+    assert lead["sigma"] > near["sigma"]                    # wider σ → fixes the overconfidence
+    assert lead["bias"] == near["bias"]                     # bias unchanged (matches the live forecast source)
+    assert lead["near_analysis_sigma"] == near["sigma"]     # kept for transparency
+
+
+def test_leadtime_sigma_falls_back_when_missing(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (0.3 if d % 2 else -0.3)} for d in range(1, 13)])
+    monkeypatch.setattr(R, "LEADTIME", tmp_path / "nope.jsonl")
+    R._leadtime_index.cache_clear()
+    cal = R.fair_calibration("EGLC", lead_days=1)           # graceful: no leadtime file → keep near-analysis σ
+    assert cal is not None and cal["sigma_source"] == "near_analysis"
+
+
+def test_leadtime_sigma_thin_station_falls_back(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (0.3 if d % 2 else -0.3)} for d in range(1, 13)])
+    _write_leadtime(tmp_path, monkeypatch, [   # < FAIR_MIN_N leadtime rows → not enough to trust
+        {"station": "EGLC", "date": f"2026-05-0{d}", "lead_days": 1, "residual": 1.5} for d in range(1, 4)])
+    assert R.leadtime_sigma("EGLC", 1) is None
+    assert R.fair_calibration("EGLC", lead_days=1)["sigma_source"] == "near_analysis"
+
+
+def test_leadtime_sigma_keeps_wider_near_analysis(tmp_path, monkeypatch):
+    # model-mismatch city (Seoul/Tokyo): near-analysis σ already WIDE (±2.0) > ECMWF leadtime σ (±0.5) → change A
+    # must keep the wider σ, never make the farmer MORE overconfident than today.
+    _write(tmp_path, monkeypatch, [
+        {"station": "RKSI", "date": f"2026-06-{d:02d}", "residual": (2.0 if d % 2 else -2.0)} for d in range(1, 13)])
+    _write_leadtime(tmp_path, monkeypatch, [
+        {"station": "RKSI", "date": f"2026-05-{d:02d}", "lead_days": 1, "residual": (0.5 if d % 2 else -0.5)}
+        for d in range(1, 13)])
+    near = R.fair_calibration("RKSI")
+    lead = R.fair_calibration("RKSI", lead_days=1)
+    assert lead["sigma"] == near["sigma"] and lead["sigma_source"] == "near_analysis"   # wider σ kept (max)
+    assert lead["leadtime_sigma"] < near["sigma"]          # narrower leadtime σ recorded but NOT used

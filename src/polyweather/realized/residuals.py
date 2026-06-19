@@ -7,10 +7,13 @@ from __future__ import annotations
 import json
 import math
 import statistics
+from collections import defaultdict
+from functools import lru_cache
 
 from .feature_store import DATA_DIR
 
 RESIDUALS = DATA_DIR / "forecast_residuals.jsonl"
+LEADTIME = DATA_DIR / "leadtime_residuals.jsonl"   # FIXED-lead residuals (maintain/build_leadtime_dataset.py)
 WINDOWS = (3, 7, 14, 30)
 POOLED_SIGMA = 2.0     # fallback forecast-error std (°C) when a station has too few residuals for its own
 FAIR_MIN_N = 8         # need this many residuals for a per-station sigma; else fall back to POOLED_SIGMA
@@ -41,6 +44,31 @@ def _load(station: str) -> list[dict]:
             rows.append(r)
     rows.sort(key=lambda r: r["date"])
     return rows
+
+
+@lru_cache(maxsize=1)
+def _leadtime_index(_mtime: float) -> dict[tuple[str, int], list[dict]]:
+    """All leadtime residual rows grouped by (station, lead_days). Cached on the file mtime so the big
+    file is parsed once and reloaded only when build_leadtime_dataset.py rewrites it."""
+    idx: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    for line in LEADTIME.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (r.get("station") and isinstance(r.get("lead_days"), int)
+                and isinstance(r.get("residual"), (int, float))):
+            idx[(r["station"], r["lead_days"])].append(r)
+    return idx
+
+
+def _load_leadtime(station: str, lead_days: int) -> list[dict]:
+    if not LEADTIME.exists():
+        return []
+    return _leadtime_index(LEADTIME.stat().st_mtime).get((station, lead_days), [])
 
 
 def _stats(rows: list[dict]) -> dict | None:
@@ -89,13 +117,35 @@ def recent_bias(station: str, *, regime: str | None = None) -> dict | None:
     return out or None
 
 
+def leadtime_sigma(station: str, lead_days: int, *, regime: str | None = None) -> float | None:
+    """Honest forecast-error σ at a FIXED LEAD (day1=24h, day2=48h) from the full leadtime history — the
+    spread the FARMER actually faces betting tomorrow+, vs the much-too-tight lead≈0 near-analysis σ
+    (validated: London near-analysis σ 0.5 → true 24h σ 1.2). Regime-shrunk like fair_calibration. Returns
+    None when the file/station is too thin, so the caller transparently keeps the near-analysis σ."""
+    rows = _load_leadtime(station, lead_days)
+    xs = [float(r["residual"]) for r in rows]
+    if len(xs) < FAIR_MIN_N:
+        return None
+    station_sigma = max(statistics.stdev(xs), SIGMA_FLOOR)
+    sigma = station_sigma
+    matched = [float(r["residual"]) for r in rows if regime and r.get("regime") == regime]
+    if len(matched) >= REGIME_SIGMA_MIN_N:
+        weight = len(matched) / (len(matched) + REGIME_PRIOR_N)
+        sigma = weight * max(statistics.stdev(matched), SIGMA_FLOOR) + (1.0 - weight) * station_sigma
+    return round(sigma * SIGMA_INFLATE, 3)
+
+
 def fair_calibration(station: str, *, regime: str | None = None,
-                     window: int = FAIR_WINDOW) -> dict | None:
+                     window: int = FAIR_WINDOW, lead_days: int | None = None) -> dict | None:
     """Conservative station calibration, optionally conditioned on the forecast peak regime.
 
     A matching regime needs at least REGIME_MIN_N observations. Its mean is then partially pooled with
     the all-weather station mean, preventing a handful of clear/rainy days from producing a large hard
     correction. Sigma remains the all-weather station error scale until regime samples are much deeper.
+
+    `lead_days` (FARMER only): when set, the too-tight near-analysis σ is swapped for the honest FIXED-lead
+    σ (`leadtime_sigma`) — the BIAS is unchanged (it matches the live best_match forecast source). Falls back
+    to the near-analysis σ if leadtime data is missing.
     """
     rows = _load(station)[-window:]
     if not rows:
@@ -116,13 +166,20 @@ def fair_calibration(station: str, *, regime: str | None = None,
             regime_sigma = max(statistics.stdev(matched), SIGMA_FLOOR)  # (walk-forward: all-weather σ runs too tight on rainy)
             sigma = weight * regime_sigma + (1.0 - weight) * station_sigma
     sigma = sigma * SIGMA_INFLATE                                       # correct the ~10% next-day under-coverage
-    return {"sigma": round(sigma, 3), "bias": round(bias, 3), "source": source,
-            "station_n": len(rows), "station_bias": round(station_bias, 3),
-            "station_sigma": round(station_sigma, 3),
-            "regime": regime, "regime_n": len(matched),
-            "regime_bias": (round(regime_bias, 3) if regime_bias is not None else None),
-            "regime_sigma": (round(regime_sigma, 3) if regime_sigma is not None else None),
-            "regime_weight": round(weight, 3)}
+    result = {"sigma": round(sigma, 3), "bias": round(bias, 3), "source": source,
+              "station_n": len(rows), "station_bias": round(station_bias, 3),
+              "station_sigma": round(station_sigma, 3),
+              "regime": regime, "regime_n": len(matched),
+              "regime_bias": (round(regime_bias, 3) if regime_bias is not None else None),
+              "regime_sigma": (round(regime_sigma, 3) if regime_sigma is not None else None),
+              "regime_weight": round(weight, 3), "sigma_source": "near_analysis"}
+    if lead_days is not None:                                          # FARMER: the near-analysis σ is too tight
+        lt = leadtime_sigma(station, lead_days, regime=regime)         # at 24–48h lead. Use the WIDER of the two —
+        if lt is not None:                                            # never TIGHTER than now (model-mismatch cities
+            result["near_analysis_sigma"], result["leadtime_sigma"] = result["sigma"], lt   # e.g. Seoul/Tokyo keep
+            if lt > result["sigma"]:                                  # their already-wide best_match σ). Bias unchanged.
+                result["sigma"], result["sigma_source"] = lt, f"leadtime_d{lead_days}"
+    return result
 
 
 def _norm_cdf(z: float) -> float:

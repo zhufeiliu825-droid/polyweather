@@ -76,8 +76,16 @@ case "${1:-}" in
     echo "[leadtime $(ts)] done ($(wc -l < data/leadtime_residuals.jsonl) rows)"
     ;;
 
+  latency)
+    # READ-ONLY paper observer of the locked-max latency-arb (places NO orders). Every 10 min snapshots, per MVP
+    # city, whether the daily max is LOCKED and the ==max bucket's live ask + depth<0.90 → data/latency_paper.jsonl.
+    echo "[latency $(ts)] paper-observing locked-max latency-arb (read-only) → data/latency_paper.jsonl"
+    uv run python maintain/latency_paper.py
+    echo "[latency $(ts)] done"
+    ;;
+
   *)
-    echo "usage: maintenance.sh <backup|logrotate|settle|residuals|leadtime>" >&2
+    echo "usage: maintenance.sh <backup|logrotate|settle|residuals|leadtime|latency>" >&2
     exit 2
     ;;
 esac

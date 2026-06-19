@@ -300,3 +300,19 @@ def test_ladder_annotates_model_p(monkeypatch):
     # no calibration → ladder left unannotated (graceful)
     monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: None)
     assert "model_p" not in A._ladder_with_model_p([{"b": ">=30", "mkt": 0.5}], "RKSI", 32.0, "clear")[0]
+
+
+def test_log_row_records_model_p_regime_and_our_p(monkeypatch):
+    # AUDIT DATA PATH (COLLECT_BASELINE): every decision must log regime + per-bucket model_p + our_p of the
+    # pick, so a future review can VALUE-MATCH our_p vs market vs outcome instead of formula-reconstructing it.
+    monkeypatch.setattr(A, "fair_calibration", lambda st, regime=None: {"bias": 0.0, "sigma": 1.0})
+    monkeypatch.setattr(A.CityTick, "_dist", lambda self: [{"b": ">=30", "mkt": 0.5, "alive": True},
+                                                           {"b": "==25", "mkt": 0.2, "alive": True}])
+    now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
+    tick = A.CityTick("RKSI", "seoul", now, date(2026, 6, 19), now, 32.0, 32.0, 30, True)
+    tick.regime = "clear"
+    tick.decision = _conv_dec()                       # >=30 bucket, peak 32 → ~certain
+    row = tick.log_row()
+    assert row["regime"] == "clear"
+    assert row["dist"][0]["model_p"] > 0.99           # the logged ladder is now model_p-annotated
+    assert row["our_p"] == row["dist"][0]["model_p"]  # our_p = model_p of the chosen (>=30) bucket

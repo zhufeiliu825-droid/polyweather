@@ -49,6 +49,13 @@ GAMMA = "https://gamma-api.polymarket.com/events"
 CONVICTION_MAX_MULT = 3.0       # bet ranges [base, 3×base] shares (user: 10→30); 1× when thin/unsure/model-disagrees
 CONVICTION_REF_EDGE = 0.03      # edge normalization: (edge=3¢, σ=1°, conf=1) → 1× (same scale as the farmer's gate)
 
+# DATA-COLLECTION BASELINE (2026-06-19). A 2-round multi-day audit found our_p (the calibrated fair) LOSES to the
+# de-vigged market on every settled day (Brier ~0.30 vs ~0.11). While we collect a few days of VALUE-MATCHED
+# decision logs to re-test, the main bot runs its pre-staged baseline: NO conviction up-sizing and model_p NOT
+# shown to the agent — both would bet/size on the flagged signal. model_p + regime are still LOGGED (log_row) for
+# the audit. Flip to False to re-enable conviction sizing + the model_p agent reference once the data window is deep.
+COLLECT_BASELINE = True
+
 
 def _primary_regime(fan: dict | None) -> str | None:
     """Peak-time weather regime ('clear'/'cloudy'/'rainy'/'mixed') from the freshest fan/forecast met."""
@@ -327,6 +334,7 @@ class CityTick:
     decision: Decision | None = None
     state: EventState | None = None                    # the built event state (for reply re-validation)
     note: str = ""
+    regime: str | None = None                          # peak-time weather regime — logged on every decision for audits
 
     def _dist(self) -> list[dict]:
         """The bucket ladder the chooser saw — per-bucket {market mid, alive}, sorted by market price. The
@@ -342,21 +350,27 @@ class CityTick:
 
     def log_row(self) -> dict:
         d = self.decision
+        # ALWAYS log our calibrated model_p per bucket + the peak regime + our_p of the pick, so a future review
+        # can VALUE-MATCH our_p vs market vs outcome instead of formula-reconstructing it. Logging the reference
+        # never affects the bet (independent of COLLECT_BASELINE).
+        dist = _ladder_with_model_p(self._dist(), self.station_id, self.remaining, self.regime)
+        our_p = next((r.get("model_p") for r in dist
+                      if d and d.threshold is not None and r.get("b") == f"{d.comparator.value}{d.threshold}"), None)
         return {
             "ts": self.now.strftime("%Y-%m-%dT%H:%M:%SZ"), "station": self.station_id,
             "city": self.city, "mkt_day": str(self.mkt_day),
             "peak_utc": self.peak_utc.strftime("%Y-%m-%dT%H:%MZ") if self.peak_utc else None,
             "predicted_max": self.predicted_max, "forecast_peak_C": self.remaining,
-            "running_max": self.running_max, "fresh": self.fresh,
+            "running_max": self.running_max, "fresh": self.fresh, "regime": self.regime,
             "action": (d.action if d else None), "our_top": (d.label if d else None),
-            "confidence": (d.confidence if d else None),
+            "confidence": (d.confidence if d else None), "our_p": our_p,
             "market": (d.market_yes if d else None), "maker": (d.maker_price if d else None),
             "order_type": (d.order_type if d else None),   # always "maker" (a resting GTD bid)
             "health": (d.health_ok if d else None), "note": self.note,
             "reason": (d.reason if d else None),
             "agent": (self.agent or None),   # the LLM proposal (None = deterministic path)
             "momentum": (self.momentum or None),  # recent-drawdown signal {window_min, drop_pct, is_big_drop}
-            "dist": self._dist(),            # the bucket ladder (market mid + alive) the chooser saw
+            "dist": dist,                    # bucket ladder — market mid + alive + our model_p (for the audit)
         }
 
 
@@ -447,6 +461,7 @@ async def analyze_city(client: httpx.AsyncClient, stn, now_utc: datetime,
     if agent.enabled() and baseline is not None:
         realized_met = await latest_metar_met(client, stn.station_id, stn.timezone, mkt_day)   # surface met now
         fan = fan_summary(stn.station_id, mkt_day)          # the day's peak-convergence fan + freshest forecast met
+        tick.regime = _primary_regime(fan)                  # logged on every decision for value-matched audits
         ctx = _agent_context(stn, tick, baseline, scan, momentum, realized_met=realized_met, fan=fan)
         proposal = await agent.propose(client, ctx, model=agent_model)
         if proposal is not None:
@@ -454,8 +469,8 @@ async def analyze_city(client: httpx.AsyncClient, stn, now_utc: datetime,
         if proposal is not None and not proposal.get("_error"):
             decision = validate_proposal(proposal, state, tick.remaining, stn.station_id,
                                          now=now_utc, peak_utc=scan.peak_utc, cutoff_utc=cutoff_utc)
-            if decision is not None and decision.action == "BET":          # conviction sizing: calibration edge÷σ × LLM confidence
-                decision.size_shares = _conviction_size(decision, tick.remaining, _primary_regime(fan))
+            if decision is not None and decision.action == "BET" and not COLLECT_BASELINE:   # conviction sizing held during baseline collection
+                decision.size_shares = _conviction_size(decision, tick.remaining, tick.regime)
             decision_momentum = momentum
             if (decision is not None and decision.token_yes
                     and decision.token_yes != baseline.token_yes):
@@ -517,9 +532,11 @@ def _agent_context(stn, tick: "CityTick", baseline, scan: "Scan", momentum: dict
         "realized_running_max_C": tick.running_max,    # HARD floor — never bet a bucket below this
         "awc_fresh": tick.fresh,
         "forecast_curve_local": _forecast_curve(scan, tick.mkt_day),   # [HH:MM, °C] — peak sharpness/shape
-        "buckets": _ladder_with_model_p(tick._dist(), stn.station_id, tick.remaining, primary_regime),
-        "model_p_note": "model_p = our CALIBRATED P(bucket YES) from forecast peak + regime residuals — a soft "
-                        "reference vs the market `mkt`; you still choose (it is not a hard rule).",
+        "buckets": (tick._dist() if COLLECT_BASELINE else
+                    _ladder_with_model_p(tick._dist(), stn.station_id, tick.remaining, primary_regime)),
+        "model_p_note": (None if COLLECT_BASELINE else
+                         "model_p = our CALIBRATED P(bucket YES) from forecast peak + regime residuals — a soft "
+                         "reference vs the market `mkt`; you still choose (it is not a hard rule)."),
         "recent_outcomes": _recent_outcomes(stn.station_id),   # this city's last ~5 settled days
         "recent_momentum": momentum or {},             # favorite's recent drawdown {window_min, drop_pct, is_big_drop}
         # MET (meteorologist context): the forecast atmosphere at the peak (fan.met_at_peak_latest) + the

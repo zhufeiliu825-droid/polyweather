@@ -229,15 +229,32 @@ def _ncdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+# Empirical σ(lead_h) for the nowcast = robust spread of (actual daily max − mu) by lead, fit from 2805 pre-peak
+# obs+Open-Meteo error samples over 157 city-days (2026-06-20). Replaces the old placeholder 0.45+0.55·lead,
+# which over-widened σ far out (3.2 vs 1.41 at 5h — OM already captures most of the remaining rise). RE-FIT as
+# obs accumulate: near-peak (lead<0.5h) n is still ~5.
+_SIGMA_FIT = [(0.25, 0.35), (0.75, 0.65), (1.5, 0.96), (2.5, 1.19), (5.0, 1.41)]
+
+
+def _sigma(lead_h: float | None) -> float:
+    lh = max(lead_h or 0.0, 0.0)
+    if lh <= _SIGMA_FIT[0][0]:
+        return _SIGMA_FIT[0][1]
+    if lh >= _SIGMA_FIT[-1][0]:
+        return _SIGMA_FIT[-1][1]
+    for (l0, s0), (l1, s1) in zip(_SIGMA_FIT, _SIGMA_FIT[1:]):
+        if l0 <= lh <= l1:
+            return round(s0 + (s1 - s0) * (lh - l0) / (l1 - l0), 3)
+    return _SIGMA_FIT[-1][1]
+
+
 def nowcast_probs(running_max: float, om_remaining: float | None, lead_h: float | None,
                   buckets: list[tuple]) -> dict:
     """Per-bucket P over the market's bucket labels. final ~ Normal(mu, sigma) truncated below at the
-    observed running max. sigma shrinks toward the peak (anchored on the measured remaining-rise: p90 ~1C
-    at <1h, ~3C at 2-3h). TODO: replace the sigma model with the empirical remaining-rise-by-lead fit."""
+    observed running max. sigma = the empirical _sigma(lead) fit (obs+OM error spread by lead-to-peak)."""
     floor = running_max
     mu = max(running_max, om_remaining if om_remaining is not None else running_max)
-    lh = max(lead_h or 0.0, 0.0)
-    sigma = max(0.45, 0.45 + 0.55 * lh)          # ~0.45C at the peak, ~2.1C at 3h out
+    sigma = _sigma(lead_h)
     z = 1.0 - _ncdf((floor - mu) / sigma)         # truncation mass above the floor
     if z <= 1e-9:
         z = 1e-9

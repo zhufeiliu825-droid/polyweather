@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Real-time near-peak NOWCAST paper prober — READ-ONLY, places NO orders, STANDALONE (does not touch the live
+  daemon/farmer). Every 2 min it logs, per available city (Tokyo+Singapore always; Seoul+Busan once KMA_APIHUB_KEY
+  is in .env), the real-time 0.1C running max + nowcast bucket distribution + de-vigged market price ->
+  data/rt_nowcast.jsonl. After the logged days settle, maintain/rt_nowcast_score.py measures nowcast-vs-market
+  (Brier/CLV) by lead. Sources .env so KMA_APIHUB_KEY reaches the prober. Safe to run alongside everything.
+      cp run/deploy/com.polyweather.rtnowcast.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.rtnowcast.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.rtnowcast</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd /Users/wekoiuk/polyweather &amp;&amp; set -a; [ -f .env ] &amp;&amp; . ./.env; set +a; exec uv run python maintain/rt_nowcast.py</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>StartInterval</key><integer>120</integer>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/rtnowcast.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/rtnowcast.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

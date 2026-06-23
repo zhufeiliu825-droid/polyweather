@@ -8,18 +8,31 @@ _Written 2026-06-18; synchronized 2026-06-19 by Codex after the hourly Farmer LL
 > 3h and is rejected on regime change or >1.5°C forecast drift; deterministic station/regime calibration is the
 > fallback. New BUYs still require `fair_yes - bid >= 3¢`; force-flat remains **peak−6h**.
 
+> **Claude 2026-06-19 calibration + sizing pass (NOT live until BOTH bots restart):**
+> 1. **`fair_calibration` σ** is now **regime-conditioned + globally ×1.10** — validated by a walk-forward ruler over the 960 residuals (overall std(z) 1.11→1.02; rainy 1.36→1.21; mixed 1.12→1.02). The deterministic fallback σ is now honest per weather regime. New `residuals.fair_calibration` keys: `station_sigma`, `regime_sigma`.
+> 2. **Conviction position sizing on BOTH bots** (size by edge÷σ): **Farmer** `size = rewardsMinSize × clamp(edge/(0.03·σ),1,3)` (`_conviction_mult`, `MAX_SIZE_MULT=3`), hard-floored at the reward min so a bid never loses reward eligibility. **Main bot** (`analyze._conviction_size`) `size = base × clamp(confidence × edge/(0.03·σ),1,3)` = **10–30 sh**, hard-floored at the already-$1-cleared base (sub-10¢ buckets keep their sized-up share count); only ever UP, and never when the calibration disagrees (edge≤0). `CONVICTION_MAX_MULT=3`, `CONVICTION_REF_EDGE=0.03` (top of `analyze.py`).
+> 3. **Main bot agent context** gains **`model_p`** per bucket (our calibrated P(YES)) as a SOFT reference next to market `mkt` — the LLM still chooses.
+> 4. Live launcher raised to **`--cap 200 --max 20`** (farmer); `run_rewards.py` defaults + this doc synced.
+> Both bots' sizing keeps the $1 platform minimum AND the farmer's reward-eligibility minimum via explicit `max(…, floor)` guards + tests.
+
+> **Claude 2026-06-19 change A — Farmer LEAD-MATCHED σ (NOT live until farmer restart):** the near-analysis σ (`forecast_residuals.jsonl`, lead≈0) is far too tight for the 24–48h lead the Farmer actually bets at (London σ 0.5 vs true 1.2 — measured on 2.4 yr). Fix: `residuals.fair_calibration(station, regime, lead_days=N)` swaps in the honest FIXED-lead σ from `data/leadtime_residuals.jsonl` (`leadtime_sigma()`), taking the **max** of near-analysis vs leadtime σ so it's NEVER *tighter* than before (model-mismatch cities Seoul/Tokyo keep their wider best_match σ); **bias unchanged** (matches the live best_match source). `scan.py` maps `hours_to_peak`→lead (12–36h→d1, ≥36h→d2). **Farmer only** — the main bot's near-peak short lead keeps near-analysis σ; its lever is a future nowcast track. Data built by `maintain/build_leadtime_dataset.py` (Open-Meteo **Previous Runs** ECMWF `temperature_2m_previous_dayN` + met-at-lead, joined to IEM METAR max — the SAME truth as build_residuals), refreshed **weekly** by `maintenance.sh leadtime` + `com.polyweather.leadtime.plist` (rolling 24 mo, atomic-swap). A generative-MOS (quantile gradient-boosting, recency + σ-calibrated) was built + ruler-tested (`maintain/eval_leadtime.py`, `train_mos.py`) → **at parity** with the lead-matched calibration (24h tie, 48h +1.2%) → **shelved** (sklearn in dev-deps only; tooling kept for re-runs).
+
+> **⚠️ STRATEGIC PRIORITY (user, 2026-06-19) — read first.** The **directional (main) bot's win rate is the durable mission.** The Farmer's only income is Polymarket **liquidity rewards** — a *recent* platform policy that can be cut or removed at any time; **if rewards end, the Farmer has no reason to run.** So the primary, lasting investment is the **main bot's forecast edge / win rate** (calibration, lead-time-correct MOS, regime σ). Keep the Farmer running and safe, but **weigh any heavy Farmer-only work (e.g. the separate-funder root fix, §4.1) against the risk that the rewards policy disappears first.** This reframes §0 below: where it says "the Farmer is your focus," the *durable* priority is the main bot.
+
 ---
 
 ## 0. TL;DR — what you're inheriting and what to do
 
 `polyweather` runs **two** LIVE real-money Polymarket bots on a 24/7 Mac mini:
 1. **Directional daemon** — bets the daily-high-temperature buckets near each city's forecast peak (the main strategy; mostly out of scope for you).
-2. **Reward farmer** — `src/polyweather/rewards/` — rests passive maker bids on temperature reward buckets to earn Polymarket **liquidity rewards** (paid for RESTING in-band, not for filling). **This is your focus.**
+2. **Reward farmer** — `src/polyweather/rewards/` — rests passive maker bids on temperature reward buckets to earn Polymarket **liquidity rewards** (paid for RESTING in-band, not for filling). **This is your near-term focus** (durable priority = main bot win rate — see the Strategic Priority note up top).
 
 The Farmer is LIVE under `com.polyweather.rewards`; the hourly adviser was loaded and verified on 2026-06-18
 22:52Z. The first batch returned 35 valid records for 36 events (33 participate, 2 skip); subsequent 5-minute
 cycles reused the cache. Existing resting/filled state is refreshed with current advice so a fill cannot snapshot
 an obsolete fair value.
+
+_Priority note: per the Strategic Priority callout above, the main bot's win rate outranks every Farmer item below — keep the Farmer safe, but don't spend the full 2 days here if the rewards policy looks shaky._
 
 **The audit's verdict (your main job): the design has ONE architectural root cause — a shared funder wallet — and patching it locally does not converge.** The user chose to **accept + monitor** for now (option 3). Your 2 days, roughly in priority order:
 1. **The root fix** — research + implement a separate funder wallet for the farmer ("option 1", §4.1), and/or harden the shared-funder accounting ("option 2", §4.2). This is the main thing.
@@ -77,7 +90,7 @@ FILLED tokens remain in scan context so fair/maker SELL management continues aft
 uv run pytest -q                          # full suite (must stay green)
 uvx ruff check src/ tests/ run/           # lint (must stay clean)
 POLY_DRY_RUN=1 uv run python run/run_rewards.py --scan-once --top 10
-POLY_DRY_RUN=1 uv run python run/run_rewards.py --farm-dry --cap 100 --max 10
+POLY_DRY_RUN=1 uv run python run/run_rewards.py --farm-dry --cap 200 --max 20
 ```
 `plan_cycle` is a PURE function — unit-test new logic against it directly (see the existing tests for the `_filled(...)`, `_order(...)`, `_held(...)`, `_t(...)` helpers). Prefer pure-function tests over live calls.
 
@@ -132,7 +145,7 @@ compare alternatives, but changing this requires another explicit user decision:
 
 ### 4.4 Other research the user would value
 - **Positive-edge validation:** the fair-value model (`residuals.bucket_fair_yes`) uses per-station residual σ/bias. Validate it against held-out residuals; is the new 3¢ `MIN_MODEL_EDGE` enough after model error? (Calibration fact: for `==N` buckets, P(round(actual)==N) is only ~24% even when the forecast peak rounds to N.)
-- **Reward yield:** are we farming the best buckets? Competition vs pool analysis from the scan logs. Is `--cap 100 --max 10` optimal?
+- **Reward yield:** are we farming the best buckets? Competition vs pool analysis from the scan logs. Is `--cap 200 --max 20` optimal?
 
 ### 4.5 Hourly LLM calibration adviser — COMPLETED / LIVE
 
@@ -207,6 +220,48 @@ The audit found that **local patches to this state machine keep introducing new 
 - Polymarket liquidity-rewards docs: https://docs.polymarket.com/developers/market-makers/liquidity-rewards
 - The directional bot's fill test that the co-hold could mis-attribute: `run/run_daemon.py` (search `sz`). Worth understanding for §4.1.
 - Calibration: `data/forecast_residuals.jsonl` (per-station forecast−actual residuals; drives both the EV gate and the directional bot).
+
+### 8.1 Temperature ML research (2026-06-19)
+
+The proposed next-temperature model is feasible, but the recommended production target is a probabilistic,
+multi-horizon **residual model on top of NWP**, including a daily-max distribution and integer-bucket
+probabilities. Do not start with a local-only autoregressive replacement for NWP: it cannot see upstream fronts
+and optimizes the wrong objective for a daily-high market.
+
+The full design, data schema, leakage controls, evaluation gates and staged implementation are documented in
+`docs/temperature_ml_research.md`. Local inventory at research time: 4,372 METAR rows across 32 stations
+(EGLC about 20 days, most stations 2-3 days), 960 daily residual rows, and 2,404 issue-time forecast snapshots
+across 110 station/day files. This is enough to validate a pipeline, not to fit a production sequence model;
+backfill at least two years and target five years.
+
+**Important calibration caveat:** `maintain/build_residuals.py` currently uses Open-Meteo Historical Forecast,
+which stitches the first hours of successive model runs. Those 30-day residuals remain useful as a recent
+near-analysis station/regime bias reference, but they are not a strict 12h/24h live-forecast error distribution.
+ML training and promotion must use issue-time-aligned Previous Runs, Single Runs, or our own snapshots, split
+chronologically by whole day. Keep the initial model in read-only shadow mode for at least 30 days; it must never
+control the order state machine directly.
+
+### 8.2 Lead-time calibration risk (Claude/Codex review, 2026-06-19)
+
+An adversarial review with Claude Desktop confirmed the caveat above and surfaced a more immediate unresolved
+risk. The Farmer buys tomorrow+ markets at roughly 12-48h lead, while its current bias/sigma sample comes from
+Historical Forecast's stitched first-run hours (roughly near-analysis lead). Forecast error normally depends on
+lead, so the current Farmer sigma **may be too small**, producing over-sharp `fair_yes` and overconfident ranking
+or conviction sizing. This is a hypothesis to measure, not yet a finding. The main directional bot operates much
+closer to the peak and is probably less exposed to this mismatch.
+
+Do the read-only fixed-lead audit before ML-MOS or any further sizing rollout: backfill Open-Meteo Previous Runs
+`previous_day1`/`previous_day2`, align each sample to the Farmer's actual decision lead, join to settled METAR
+daily maxima, then compare bias, sigma, CRPS/Brier and interval coverage against the current calibration. Previous
+Runs provides historical fixed-lead data, so there is no need to wait months for new local snapshots; use the
+2,404 stored issue-time snapshots to cross-check API alignment. Do not change live sigma until the audit is
+complete, reviewed and explicitly approved.
+
+Review consensus: the existing 960 rows may validate the evaluation harness and describe near-analysis
+station/regime structure, but cannot establish live-lead LightGBM benefit. Defer Chronos/TimesFM to a later
+nowcast benchmark. Any candidate must beat both deterministic calibration and linear MOS on whole-day
+walk-forward Brier/log-loss with bootstrap uncertainty, cross-city/regime stability, calibration reliability and
+read-only shadow economic results; literature improvement percentages are priors, not expected project returns.
 
 ## 9. Git backup status
 

@@ -41,8 +41,10 @@ async def fetch_hourly(
     *,
     past_days: int = 0,
     forecast_days: int = 1,
+    model: str | None = None,
 ) -> list[tuple[datetime, float]]:
     """Return [(naive local datetime, temp_C)] hourly. Times are local to `tz`.
+    `model` (e.g. 'icon_seamless') pins the OpenMeteo model via &models=; None ⇒ best_match (default).
     The minimal (time, temp) projection the forecast/analysis path consumes.
 
     (The main scan uses `fetch_minutely_15` for a sharper peak TIME; this hourly fetch is
@@ -60,6 +62,7 @@ async def fetch_hourly(
             "timezone": tz,
             "past_days": past_days,
             "forecast_days": forecast_days,
+            **({"models": model} if model else {}),
         },
     )
     r.raise_for_status()
@@ -73,15 +76,17 @@ async def fetch_hourly(
 
 async def fetch_minutely_15(
     client: httpx.AsyncClient, lat: float, lon: float, tz: str, *, forecast_days: int = 2,
+    model: str | None = None,
 ) -> list[tuple[datetime, float]]:
     """15-minute `temperature_2m` forecast → [(naive local dt, temp_C)]. Same paid/free routing as
     fetch_hourly (it's the Forecast API). Used by BOTH the main scan (`scan_city`) and the strike-timing
     stage for a sharper peak TIME — NOT to change the bet bucket (the daily-max VALUE is granularity-
-    invariant; see the fetch_hourly note)."""
+    invariant; see the fetch_hourly note). `model` pins the OpenMeteo model (None ⇒ best_match)."""
     url, auth = _forecast_endpoint()
     r = await client.get(url, params={**auth, "latitude": lat, "longitude": lon,
                                       "minutely_15": "temperature_2m", "timezone": tz,
-                                      "forecast_days": forecast_days})
+                                      "forecast_days": forecast_days,
+                                      **({"models": model} if model else {})})
     r.raise_for_status()
     return _parse_minutely_15(r.json())
 
@@ -112,49 +117,55 @@ def _parse_hourly_met(payload: dict) -> list[dict]:
 
 
 async def fetch_hourly_met(client: httpx.AsyncClient, lat: float, lon: float, tz: str,
-                           *, forecast_days: int = 2) -> list[dict]:
+                           *, forecast_days: int = 2, model: str | None = None) -> list[dict]:
     """Hourly forecast WITH the meteorologist variables → [{t: naive-local-dt, temp_C, cloud_pct, wind_kmh,
     wind_dir, gust_kmh, dewpoint_C, rh_pct, pressure_hPa, precip_mm, shortwave_wm2}]. Same paid/free routing
-    as fetch_hourly (it's the Forecast API). Powers the intraday snapshot fan + the met context for both LLMs."""
+    as fetch_hourly (it's the Forecast API). Powers the intraday snapshot fan + the met context for both LLMs.
+    `model` pins the OpenMeteo model (None ⇒ best_match)."""
     url, auth = _forecast_endpoint()
     r = await client.get(url, params={**auth, "latitude": lat, "longitude": lon,
                                       "hourly": ",".join(MET_VARS), "timezone": tz,
-                                      "forecast_days": forecast_days})
+                                      "forecast_days": forecast_days,
+                                      **({"models": model} if model else {})})
     r.raise_for_status()
     return _parse_hourly_met(r.json())
 
 
 async def fetch_minutely_15_with_hourly_met(
     client: httpx.AsyncClient, lat: float, lon: float, tz: str, *, forecast_days: int = 2,
+    model: str | None = None,
 ) -> tuple[list[tuple[datetime, float]], list[dict]]:
     """Fetch the 15-minute temperature curve and hourly meteorology in one API request.
 
     Reward farming needs tomorrow's sharper peak time and its weather regime every cycle; combining the
-    projections avoids doubling Open-Meteo traffic for every city.
+    projections avoids doubling Open-Meteo traffic for every city. `model` pins the OpenMeteo model.
     """
     url, auth = _forecast_endpoint()
     r = await client.get(url, params={**auth, "latitude": lat, "longitude": lon,
                                       "minutely_15": "temperature_2m",
                                       "hourly": ",".join(MET_VARS), "timezone": tz,
-                                      "forecast_days": forecast_days})
+                                      "forecast_days": forecast_days,
+                                      **({"models": model} if model else {})})
     r.raise_for_status()
     payload = r.json()
     return _parse_minutely_15(payload), _parse_hourly_met(payload)
 
 
 async def fetch_previous_runs(client: httpx.AsyncClient, lat: float, lon: float, tz: str,
-                              target: date) -> dict:
+                              target: date, *, model: str | None = None) -> dict:
     """Multi-model-run PEAK SPREAD for the `target` local day, from the FREE Previous-Model-Runs API
     (open-access, NO apikey — this API is NOT in the Standard tier, like the other historical endpoints).
     `temperature_2m_previous_dayN` is the curve as the run N days ago forecast it, on the SAME time axis as
     the latest run → a compact uncertainty + peak-time-RANGE signal for the strike-timing LLM (the latest
-    single run is noisy/early; the spread is the usable signal). Returns {} on any failure (never raises)."""
+    single run is noisy/early; the spread is the usable signal). Returns {} on any failure (never raises).
+    `model` pins the model so the run-to-run spread is for ONE model (None ⇒ best_match — mixes models)."""
     keys = ["temperature_2m", "temperature_2m_previous_day1",
             "temperature_2m_previous_day2", "temperature_2m_previous_day3"]
     try:
         r = await client.get(PREV_RUNS, params={"latitude": lat, "longitude": lon,
                                                 "hourly": ",".join(keys), "timezone": tz,
-                                                "forecast_days": 2}, timeout=30.0)
+                                                "forecast_days": 2,
+                                                **({"models": model} if model else {})}, timeout=30.0)
         r.raise_for_status()
         H = r.json().get("hourly") or {}
     except Exception:

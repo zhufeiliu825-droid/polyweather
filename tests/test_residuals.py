@@ -10,6 +10,13 @@ def _write(tmp_path, monkeypatch, rows):
     monkeypatch.setattr(R, "RESIDUALS", p)
 
 
+def _write_leadtime(tmp_path, monkeypatch, rows):
+    p = tmp_path / "leadtime_residuals.jsonl"
+    p.write_text("".join(json.dumps(x) + "\n" for x in rows))
+    monkeypatch.setattr(R, "LEADTIME", p)
+    R._leadtime_index.cache_clear()   # cache is keyed on file mtime — drop it so the temp file is read
+
+
 def test_no_file_is_none(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "RESIDUALS", tmp_path / "nope.jsonl")
     assert R.recent_bias("EGLC") is None
@@ -70,19 +77,19 @@ def test_fair_calibration_none_without_data(tmp_path, monkeypatch):
 
 
 def test_fair_calibration_thin_sample_uses_pooled_sigma(tmp_path, monkeypatch):
-    # < FAIR_MIN_N rows → bias from the mean, sigma = POOLED_SIGMA (don't trust a tiny-sample std)
+    # < FAIR_MIN_N rows → bias from the mean, sigma = POOLED_SIGMA × the global inflation (don't trust a tiny-sample std)
     _write(tmp_path, monkeypatch, [{"station": "EGLC", "date": f"2026-06-1{d}", "residual": 1.0} for d in range(3)])
     calibration = R.fair_calibration("EGLC")
-    assert calibration["sigma"] == R.POOLED_SIGMA and abs(calibration["bias"] - 1.0) < 1e-9
+    assert abs(calibration["sigma"] - R.POOLED_SIGMA * R.SIGMA_INFLATE) < 1e-9 and abs(calibration["bias"] - 1.0) < 1e-9
 
 
 def test_fair_calibration_uses_station_std_when_enough(tmp_path, monkeypatch):
-    # ≥ FAIR_MIN_N rows alternating ±1 → mean 0, std 1.0 (> SIGMA_FLOOR) → its own sigma
+    # ≥ FAIR_MIN_N rows alternating ±1 → mean 0, std ~1.04 → its own sigma × the global ~1.10 inflation
     rows = [{"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (1.0 if d % 2 else -1.0)} for d in range(1, 13)]
     _write(tmp_path, monkeypatch, rows)
     calibration = R.fair_calibration("EGLC")
     assert abs(calibration["bias"]) < 1e-9
-    assert 1.0 < calibration["sigma"] < 1.1 and calibration["sigma"] != R.POOLED_SIGMA
+    assert 1.10 < calibration["sigma"] < 1.20 and calibration["sigma"] != R.POOLED_SIGMA
 
 
 def test_regime_calibration_is_shrunk_and_requires_minimum_sample(tmp_path, monkeypatch):
@@ -99,6 +106,19 @@ def test_regime_calibration_is_shrunk_and_requires_minimum_sample(tmp_path, monk
     assert thin["source"] == "station" and thin["regime_n"] == 0
 
 
+def test_regime_sigma_widens_a_noisy_regime(tmp_path, monkeypatch):
+    # ≥ REGIME_SIGMA_MIN_N spread-out 'rainy' rows + tight all-station context → the rainy σ is conditioned
+    # (shrunk toward the station σ) and reflects rainy's bigger spread, not just the all-weather number.
+    rows = ([{"station": "RKSI", "date": f"2026-05-{d:02d}", "residual": (0.2 if d % 2 else -0.2), "regime": "clear"}
+             for d in range(1, 13)]
+            + [{"station": "RKSI", "date": f"2026-06-{d:02d}", "residual": (3.0 if d % 2 else -3.0), "regime": "rainy"}
+               for d in range(1, 9)])
+    _write(tmp_path, monkeypatch, rows)
+    rainy = R.fair_calibration("RKSI", regime="rainy")
+    assert rainy["regime_sigma"] is not None and rainy["regime_n"] == 8
+    assert rainy["sigma"] > rainy["station_sigma"]            # the noisy regime widens σ above the all-weather scale
+
+
 def test_bucket_fair_yes_eq_is_low_at_peak():
     # ==N with mu exactly on N and a wide sigma=2 → P(round==N) is only the ±0.5 slice (~0.2), matching calibration
     p = R.bucket_fair_yes("==", 27, mu=27.0, sigma=2.0)
@@ -112,3 +132,53 @@ def test_bucket_fair_yes_ge_and_le_complement():
 
 def test_bucket_fair_yes_ge_high_when_mu_above():
     assert R.bucket_fair_yes(">=", 27, mu=30.0, sigma=1.0) > 0.99      # expected max well above the threshold → near-certain YES
+
+
+# ---- change A: lead-matched σ (the farmer bets tomorrow+, where the near-analysis σ is far too tight) ----
+
+def test_leadtime_sigma_overrides_near_analysis_for_farmer(tmp_path, monkeypatch):
+    # near-analysis: TIGHT (±0.3) → small σ, bias 0; leadtime day1: WIDE (±1.5) → the honest 24h spread
+    _write(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (0.3 if d % 2 else -0.3)} for d in range(1, 13)])
+    _write_leadtime(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-05-{d:02d}", "lead_days": 1, "residual": (1.5 if d % 2 else -1.5)}
+        for d in range(1, 13)])
+    near = R.fair_calibration("EGLC")                       # no lead_days → near-analysis σ (main bot)
+    lead = R.fair_calibration("EGLC", lead_days=1)          # farmer path → honest fixed-lead σ
+    assert near["sigma_source"] == "near_analysis"
+    assert lead["sigma_source"] == "leadtime_d1"
+    assert lead["sigma"] > near["sigma"]                    # wider σ → fixes the overconfidence
+    assert lead["bias"] == near["bias"]                     # bias unchanged (matches the live forecast source)
+    assert lead["near_analysis_sigma"] == near["sigma"]     # kept for transparency
+
+
+def test_leadtime_sigma_falls_back_when_missing(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (0.3 if d % 2 else -0.3)} for d in range(1, 13)])
+    monkeypatch.setattr(R, "LEADTIME", tmp_path / "nope.jsonl")
+    R._leadtime_index.cache_clear()
+    cal = R.fair_calibration("EGLC", lead_days=1)           # graceful: no leadtime file → keep near-analysis σ
+    assert cal is not None and cal["sigma_source"] == "near_analysis"
+
+
+def test_leadtime_sigma_thin_station_falls_back(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, [
+        {"station": "EGLC", "date": f"2026-06-{d:02d}", "residual": (0.3 if d % 2 else -0.3)} for d in range(1, 13)])
+    _write_leadtime(tmp_path, monkeypatch, [   # < FAIR_MIN_N leadtime rows → not enough to trust
+        {"station": "EGLC", "date": f"2026-05-0{d}", "lead_days": 1, "residual": 1.5} for d in range(1, 4)])
+    assert R.leadtime_sigma("EGLC", 1) is None
+    assert R.fair_calibration("EGLC", lead_days=1)["sigma_source"] == "near_analysis"
+
+
+def test_leadtime_sigma_keeps_wider_near_analysis(tmp_path, monkeypatch):
+    # model-mismatch city (Seoul/Tokyo): near-analysis σ already WIDE (±2.0) > ECMWF leadtime σ (±0.5) → change A
+    # must keep the wider σ, never make the farmer MORE overconfident than today.
+    _write(tmp_path, monkeypatch, [
+        {"station": "RKSI", "date": f"2026-06-{d:02d}", "residual": (2.0 if d % 2 else -2.0)} for d in range(1, 13)])
+    _write_leadtime(tmp_path, monkeypatch, [
+        {"station": "RKSI", "date": f"2026-05-{d:02d}", "lead_days": 1, "residual": (0.5 if d % 2 else -0.5)}
+        for d in range(1, 13)])
+    near = R.fair_calibration("RKSI")
+    lead = R.fair_calibration("RKSI", lead_days=1)
+    assert lead["sigma"] == near["sigma"] and lead["sigma_source"] == "near_analysis"   # wider σ kept (max)
+    assert lead["leadtime_sigma"] < near["sigma"]          # narrower leadtime σ recorded but NOT used

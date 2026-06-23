@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather LATENCY-ARB PAPER OBSERVER — READ-ONLY, places NO orders. Every 10 min it snapshots, per MVP city,
+  whether the daily max is LOCKED (past a genuine afternoon peak + forecast can't beat the realized max) and what
+  the ==max bucket's live CLOB ask + ask-depth<0.90 is -> data/latency_paper.jsonl. A later offline join to
+  settle.jsonl turns each row into a realized fillable edge. Validates the locked-max latency-arb edge (real-time
+  fillable SIZE + forward false-lock rate) before any capital. Safe to run alongside the bots (no trading).
+      cp deploy/com.polyweather.latency.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.latency.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.latency</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/maintenance/maintenance.sh</string>
+        <string>latency</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/wekoiuk/polyweather</string>
+    <key>RunAtLoad</key><true/>
+    <key>StartInterval</key><integer>600</integer>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

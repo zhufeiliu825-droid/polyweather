@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather WEEKLY FIXED-LEAD RESIDUALS — one-shot scheduled job. Rebuilds data/leadtime_residuals.jsonl
+  (Previous Runs ECMWF forecast @ 24/48h lead vs IEM METAR max, rolling 24 mo) → the farmer's HONEST
+  fixed-lead σ (change A). σ is slow-moving, so weekly (Sunday 03:30, after the daily residuals job);
+  the rebuild is atomic-swapped so a live farmer cycle never reads a half-written file.
+      cp deploy/com.polyweather.leadtime.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.polyweather.leadtime.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.polyweather.leadtime</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/maintenance/maintenance.sh</string>
+        <string>leadtime</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/wekoiuk/polyweather</string>
+    <key>RunAtLoad</key><false/>
+    <key>StartCalendarInterval</key>
+    <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
+    <key>StandardOutPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/wekoiuk/polyweather/logs/maintenance.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

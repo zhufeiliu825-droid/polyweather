@@ -14,7 +14,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "numpy>=2.4.6",
+    "pytest>=8",
+    "scikit-learn>=1.9.0",
+]
 
 [build-system]
 requires = ["hatchling"]

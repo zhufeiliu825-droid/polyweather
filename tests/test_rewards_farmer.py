@@ -95,6 +95,34 @@ def test_select_edge_gate_fails_closed_without_fair():
     assert farmer.select([_t(mid=0.40, spread=0.01, fair_yes=None)], capital_cap=50, max_targets=5) == []
 
 
+def test_select_sizes_up_tight_high_edge_bucket():
+    # big edge (0.10) + tight σ (0.5) → conviction caps at MAX_SIZE_MULT → size = reward min × MAX
+    t = _t(fair_yes=0.30)                                                    # bid 0.20 → edge 0.10
+    t["calibration"] = {"sigma": 0.5, "bias": 0.0}
+    o = farmer.select([t], capital_cap=1000, max_targets=5)[0]
+    assert o.size == round(50 * farmer.MAX_SIZE_MULT)
+
+
+def test_select_floors_noisy_bucket_to_reward_min():
+    # min edge (0.03) + noisy σ (1.6, Seoul-like) → conviction floored at 1× → size stays the reward min
+    t = _t(fair_yes=0.23)                                                    # bid 0.20 → edge 0.03
+    t["calibration"] = {"sigma": 1.6, "bias": 0.0}
+    o = farmer.select([t], capital_cap=1000, max_targets=5)[0]
+    assert o.size == 50.0
+
+
+def test_select_no_calibration_keeps_reward_min():
+    # no σ available → no conviction tilt → size = reward min (the prior default behavior)
+    o = farmer.select([_t()], capital_cap=1000, max_targets=5)[0]            # _t() carries no calibration
+    assert o.size == 50.0
+
+
+def test_select_never_below_reward_min_even_with_small_size_mult():
+    # size_mult < 1 must NOT push the bid below the market's reward min (else the bid earns no reward)
+    o = farmer.select([_t()], capital_cap=1000, max_targets=5, size_mult=0.5)[0]
+    assert o.size == 50.0                                                    # round(50×0.5)=25 → floored back up to 50
+
+
 def test_select_edge_participates_in_reward_ranking():
     # B has a lower raw reward score but much more price edge, so combined score×edge ranks it first.
     a = _t(city="a", token_yes="A", score=1.0, fair_yes=0.24)   # bid .20, edge .04

@@ -175,22 +175,25 @@ async def scan(client: httpx.AsyncClient, stations, now: datetime, *, min_rate: 
     peaks = dict(await asyncio.gather(*[_peak(c, d) for c, d in keys]))
     books = await asyncio.gather(*[_fetch_book(client, rb.token_yes) for rb in cands])
 
-    fair_cache: dict[tuple[str, str | None], dict | None] = {}
+    fair_cache: dict[tuple[str, str | None, int | None], dict | None] = {}
     targets = []
     for rb, book in zip(cands, books):
         pval, putc, regime = peaks.get((rb.city, rb.market_date), (None, None, None))
+        h2p = round((putc - now).total_seconds() / 3600.0, 1) if putc is not None else None
+        # Farmer bets tomorrow+: map hours-to-peak to the fixed lead whose honest σ we measured (day1=24h,
+        # day2=48h). Same-day held positions (h2p<12h or passed) keep the short-lead near-analysis σ.
+        lead_days = (1 if 12.0 <= h2p < 36.0 else 2 if h2p >= 36.0 else None) if h2p is not None else None
         mid, comp, spread = book_mid_competition(book, rb.max_spread)
         lean = our_yes_lean(rb.comparator, rb.threshold, pval)
         sid = by_city[rb.city].station_id
         regime_name = (regime or {}).get("primary")
-        cache_key = (sid, regime_name)
+        cache_key = (sid, regime_name, lead_days)
         if cache_key not in fair_cache:
-            fair_cache[cache_key] = fair_calibration(sid, regime=regime_name)
+            fair_cache[cache_key] = fair_calibration(sid, regime=regime_name, lead_days=lead_days)
         calibration = fair_cache[cache_key]
         fair = (bucket_fair_yes(rb.comparator, rb.threshold,
                                 pval - calibration["bias"], calibration["sigma"])
                 if (pval is not None and calibration is not None) else None)
-        h2p = round((putc - now).total_seconds() / 3600.0, 1) if putc is not None else None
         targets.append({
             "city": rb.city, "station_id": by_city[rb.city].station_id,
             "entry_eligible": (rb.daily_rate >= min_rate

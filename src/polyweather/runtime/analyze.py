@@ -39,10 +39,65 @@ from ..models import Decision, EventState
 from ..realized.feature_store import DATA_DIR
 from ..realized.metar_parse import parse_metar
 from ..realized.metar_source import fetch_recent_awc
-from ..realized.residuals import recent_bias
+from ..realized.residuals import bucket_fair_yes, fair_calibration, recent_bias
 from ..realized.solar import day_sun
 
 GAMMA = "https://gamma-api.polymarket.com/events"
+
+# Main-bot conviction sizing — scale the FIXED bet size UP (never below) when our calibration AGREES with the
+# agent: bigger when the LLM is confident AND the calibrated edge (fair−price) is large AND the forecast σ tight.
+CONVICTION_MAX_MULT = 3.0       # bet ranges [base, 3×base] shares (user: 10→30); 1× when thin/unsure/model-disagrees
+CONVICTION_REF_EDGE = 0.03      # edge normalization: (edge=3¢, σ=1°, conf=1) → 1× (same scale as the farmer's gate)
+
+# DATA-COLLECTION BASELINE (2026-06-19). A 2-round multi-day audit found our_p (the calibrated fair) LOSES to the
+# de-vigged market on every settled day (Brier ~0.30 vs ~0.11). While we collect a few days of VALUE-MATCHED
+# decision logs to re-test, the main bot runs its pre-staged baseline: NO conviction up-sizing and model_p NOT
+# shown to the agent — both would bet/size on the flagged signal. model_p + regime are still LOGGED (log_row) for
+# the audit. Flip to False to re-enable conviction sizing + the model_p agent reference once the data window is deep.
+COLLECT_BASELINE = True
+
+
+def _primary_regime(fan: dict | None) -> str | None:
+    """Peak-time weather regime ('clear'/'cloudy'/'rainy'/'mixed') from the freshest fan/forecast met."""
+    regime = (fan or {}).get("regime_latest") or classify_regime((fan or {}).get("met_at_peak_latest"))
+    return (regime or {}).get("primary")
+
+
+def _conviction_size(d: Decision, forecast_peak: float | None, regime: str | None) -> float:
+    """Conviction-scaled bet size = base × clamp(confidence × calibrated_edge ÷ σ, 1, CONVICTION_MAX_MULT). Only
+    ever UP from the base (floor 1×). Returns base unchanged when inputs are missing OR the calibration DISAGREES
+    (edge ≤ 0) — we never upsize a bet our own fair value calls rich. The agent still PICKS the bucket; this only
+    sizes it bigger when the model and the agent agree AND the forecast is reliable."""
+    base = d.size_shares
+    if forecast_peak is None or d.confidence is None or d.maker_price is None or d.threshold is None:
+        return base
+    cal = fair_calibration(d.station_id, regime=regime)
+    if not cal:
+        return base
+    fair = bucket_fair_yes(d.comparator.value, d.threshold, forecast_peak - cal["bias"], cal["sigma"])
+    edge = fair - d.maker_price
+    if edge <= 0:
+        return base
+    mult = min(max(d.confidence * edge / (CONVICTION_REF_EDGE * max(cal["sigma"], 0.1)), 1.0), CONVICTION_MAX_MULT)
+    return float(max(round(base * mult), base))   # NEVER below the base — it is already $1-cleared (sub-10¢ buckets size up)
+
+
+def _ladder_with_model_p(ladder: list[dict], station_id: str, peak: float | None, regime: str | None) -> list[dict]:
+    """Annotate each market-ladder row with `model_p` = our CALIBRATED P(this bucket resolves YES) from the
+    forecast peak + regime residuals (same fair value the farmer uses). A soft REFERENCE for the agent to weigh
+    against the market `mkt` — it still chooses. Left unannotated when there's no calibration/peak. Each row's
+    `b` is '{comparator}{threshold}' (e.g. '>=30', '==25', '<=-5')."""
+    cal = fair_calibration(station_id, regime=regime) if peak is not None else None
+    if not cal:
+        return ladder
+    mu = peak - cal["bias"]
+    for r in ladder:
+        b = str(r.get("b", ""))
+        try:
+            r["model_p"] = round(bucket_fair_yes(b[:2], int(b[2:]), mu, cal["sigma"]), 3)
+        except (ValueError, KeyError):
+            continue
+    return ladder
 CLOB_BOOKS = "https://clob.polymarket.com/books"   # live orderbook (the book we actually trade against)
 CLOB_PRICES_HISTORY = "https://clob.polymarket.com/prices-history"  # token price series → momentum (drawdown) check
 UTC = timezone.utc
@@ -249,7 +304,8 @@ async def scan_city(client: httpx.AsyncClient, stn, now_utc: datetime) -> Scan:
     z = ZoneInfo(stn.timezone)
     mkt_day = now_utc.astimezone(z).date()
     try:
-        curve = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2)
+        curve = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2,
+                                        model=stn.forecast_model)
     except Exception as e:
         log_failure("open_meteo", kind="fetch_failed", detail=str(e),
                     station=stn.station_id, city=stn.city, consequence="skipped")
@@ -279,6 +335,7 @@ class CityTick:
     decision: Decision | None = None
     state: EventState | None = None                    # the built event state (for reply re-validation)
     note: str = ""
+    regime: str | None = None                          # peak-time weather regime — logged on every decision for audits
 
     def _dist(self) -> list[dict]:
         """The bucket ladder the chooser saw — per-bucket {market mid, alive}, sorted by market price. The
@@ -294,21 +351,27 @@ class CityTick:
 
     def log_row(self) -> dict:
         d = self.decision
+        # ALWAYS log our calibrated model_p per bucket + the peak regime + our_p of the pick, so a future review
+        # can VALUE-MATCH our_p vs market vs outcome instead of formula-reconstructing it. Logging the reference
+        # never affects the bet (independent of COLLECT_BASELINE).
+        dist = _ladder_with_model_p(self._dist(), self.station_id, self.remaining, self.regime)
+        our_p = next((r.get("model_p") for r in dist
+                      if d and d.threshold is not None and r.get("b") == f"{d.comparator.value}{d.threshold}"), None)
         return {
             "ts": self.now.strftime("%Y-%m-%dT%H:%M:%SZ"), "station": self.station_id,
             "city": self.city, "mkt_day": str(self.mkt_day),
             "peak_utc": self.peak_utc.strftime("%Y-%m-%dT%H:%MZ") if self.peak_utc else None,
             "predicted_max": self.predicted_max, "forecast_peak_C": self.remaining,
-            "running_max": self.running_max, "fresh": self.fresh,
+            "running_max": self.running_max, "fresh": self.fresh, "regime": self.regime,
             "action": (d.action if d else None), "our_top": (d.label if d else None),
-            "confidence": (d.confidence if d else None),
+            "confidence": (d.confidence if d else None), "our_p": our_p,
             "market": (d.market_yes if d else None), "maker": (d.maker_price if d else None),
             "order_type": (d.order_type if d else None),   # always "maker" (a resting GTD bid)
             "health": (d.health_ok if d else None), "note": self.note,
             "reason": (d.reason if d else None),
             "agent": (self.agent or None),   # the LLM proposal (None = deterministic path)
             "momentum": (self.momentum or None),  # recent-drawdown signal {window_min, drop_pct, is_big_drop}
-            "dist": self._dist(),            # the bucket ladder (market mid + alive) the chooser saw
+            "dist": dist,                    # bucket ladder — market mid + alive + our model_p (for the audit)
         }
 
 
@@ -399,6 +462,7 @@ async def analyze_city(client: httpx.AsyncClient, stn, now_utc: datetime,
     if agent.enabled() and baseline is not None:
         realized_met = await latest_metar_met(client, stn.station_id, stn.timezone, mkt_day)   # surface met now
         fan = fan_summary(stn.station_id, mkt_day)          # the day's peak-convergence fan + freshest forecast met
+        tick.regime = _primary_regime(fan)                  # logged on every decision for value-matched audits
         ctx = _agent_context(stn, tick, baseline, scan, momentum, realized_met=realized_met, fan=fan)
         proposal = await agent.propose(client, ctx, model=agent_model)
         if proposal is not None:
@@ -406,6 +470,8 @@ async def analyze_city(client: httpx.AsyncClient, stn, now_utc: datetime,
         if proposal is not None and not proposal.get("_error"):
             decision = validate_proposal(proposal, state, tick.remaining, stn.station_id,
                                          now=now_utc, peak_utc=scan.peak_utc, cutoff_utc=cutoff_utc)
+            if decision is not None and decision.action == "BET" and not COLLECT_BASELINE:   # conviction sizing held during baseline collection
+                decision.size_shares = _conviction_size(decision, tick.remaining, tick.regime)
             decision_momentum = momentum
             if (decision is not None and decision.token_yes
                     and decision.token_yes != baseline.token_yes):
@@ -467,7 +533,11 @@ def _agent_context(stn, tick: "CityTick", baseline, scan: "Scan", momentum: dict
         "realized_running_max_C": tick.running_max,    # HARD floor — never bet a bucket below this
         "awc_fresh": tick.fresh,
         "forecast_curve_local": _forecast_curve(scan, tick.mkt_day),   # [HH:MM, °C] — peak sharpness/shape
-        "buckets": tick._dist(),                       # the market ladder you choose from: [{b, mkt, alive}]
+        "buckets": (tick._dist() if COLLECT_BASELINE else
+                    _ladder_with_model_p(tick._dist(), stn.station_id, tick.remaining, primary_regime)),
+        "model_p_note": (None if COLLECT_BASELINE else
+                         "model_p = our CALIBRATED P(bucket YES) from forecast peak + regime residuals — a soft "
+                         "reference vs the market `mkt`; you still choose (it is not a hard rule)."),
         "recent_outcomes": _recent_outcomes(stn.station_id),   # this city's last ~5 settled days
         "recent_momentum": momentum or {},             # favorite's recent drawdown {window_min, drop_pct, is_big_drop}
         # MET (meteorologist context): the forecast atmosphere at the peak (fan.met_at_peak_latest) + the
@@ -541,7 +611,8 @@ async def decide_strike(client: httpx.AsyncClient, stn, scan: "Scan",
 
     prev_runs, late_peak_utc = {}, None                # multi-run spread (FREE) + its late-bound peak time
     try:
-        prev_runs = await fetch_previous_runs(client, stn.latitude, stn.longitude, stn.timezone, mkt_day)
+        prev_runs = await fetch_previous_runs(client, stn.latitude, stn.longitude, stn.timezone, mkt_day,
+                                              model=stn.forecast_model)
         if prev_runs.get("peak_time_max"):
             hh, mm = (int(x) for x in prev_runs["peak_time_max"].split(":"))
             late_peak_utc = datetime.combine(mkt_day, time(hh, mm), tzinfo=z).astimezone(UTC)
@@ -551,7 +622,8 @@ async def decide_strike(client: httpx.AsyncClient, stn, scan: "Scan",
     m15_peak_local = None
     if STRIKE_USE_MINUTELY15:
         try:
-            m15 = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2)
+            m15 = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2,
+                                          model=stn.forecast_model)
             day = [(dt, tp) for dt, tp in m15 if dt.date() == mkt_day]
             if day:
                 m15_peak_local = max(day, key=lambda x: x[1])[0].strftime("%H:%M")
@@ -599,7 +671,8 @@ async def snapshot_city(client: httpx.AsyncClient, stn, scan: "Scan", now_utc: d
     """Fetch the hourly-met forecast and append ONE compact snapshot {issue_utc, peak_C, peak_local,
     met_at_peak} for `scan.mkt_day`. Accumulated hourly → the day's peak-convergence fan (read by the strike +
     decision LLMs). Returns the record (or None if no usable market-day forecast). NEVER raises (caller logs)."""
-    met = await fetch_hourly_met(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2)
+    met = await fetch_hourly_met(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2,
+                                 model=stn.forecast_model)
     day = [h for h in met if h["t"].date() == scan.mkt_day]
     if not day:
         return None

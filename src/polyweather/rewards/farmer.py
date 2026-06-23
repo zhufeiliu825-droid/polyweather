@@ -22,7 +22,7 @@ from decimal import ROUND_DOWN, Decimal
 from .. import clob_executor as ex
 from ..models import Comparator, Decision
 from ..params import HEALTH_SUM_HI, HEALTH_SUM_LO, MAKER_FLOOR as PRICE_FLOOR
-from ..params import MAX_SPREAD, MIN_ORDER_SHARES, MIN_ORDER_USD
+from ..params import MAX_SIZE_USD, MAX_SPREAD, MIN_ORDER_SHARES, MIN_ORDER_USD
 from ..realized.feature_store import DATA_DIR
 from .advice import apply_advice, hourly_advice
 from .scan import scan
@@ -31,11 +31,20 @@ FARM_LOG = DATA_DIR / "reward_orders.jsonl"
 REWARD_STATE_FILE = DATA_DIR / "reward_state.json"
 MIN_LEAN = 0.3                 # floor to be a top-2 candidate — the peak's two straddling buckets clear this when it sits genuinely between them
 MAX_PER_EVENT = 2              # farm the ≤2 MOST-LIKELY buckets per event (the peak's floor+ceil) — user's design
+SUSPENDED_STATIONS = {"RKSI", "RJTT"}   # Seoul/Tokyo: marine-cold airport coords → OM forecast (the farmer's lean) is
+#                                         wrong by 5°/2°, so its forecast-favored bucket is the WRONG one. Suspended
+#                                         from farming until a dedicated nowcast exists. (matches the cluster-advisor suspend.)
 MID_LO, MID_HI = 0.10, 0.84   # single-leg scores ≥0.10; cap <0.85 so the bid clears the executor's price ceiling
 TICK = 0.01                   # every farmed bucket is in [0.10,0.84] → the 0.01 tick (50 sh × 2-dp price = ≤2-dp ✓)
 REPRICE_DRIFT = 0.02          # reprice when the resting bid drifts > this from the live mid (score ≈31% at 2¢, ≈0 at the 4.5¢ band edge)
 UNDERCUT_C = 0.02             # bid this far below mid AND never above the best bid → a PASSIVE maker (sits in the band, doesn't jump near the ask = instant fill)
-MIN_MODEL_EDGE = 0.03          # only buy when calibrated fair P(YES) is at least 3¢ ABOVE our passive bid
+MIN_MODEL_EDGE = 0.03          # conviction-sizing denominator (KEEP >0). NOT the entry gate anymore — see FARM_MIN_EDGE
+FARM_MIN_EDGE = -0.10          # ENTRY gate (broad-coverage farm): farm forecast-favored (lean≥0.3) buckets even when
+#                               our passive bid sits up to 10¢ ABOVE our fair — the market prices these ~6¢ over our fair
+#                               (median), so a ≥0 floor only finds ~5 cities; −0.10 covers ~19-20 °C cities (~$100 < $250
+#                               cap). Reward (resting) is the +EV; fills are on lean-favored buckets, backstopped by the
+#                               stop-loss + TAKE_PROFIT + per-order/total caps. DIAL: toward 0 = safer/fewer, toward −1 = all.
+#                               (MIN_MODEL_EDGE 0.03 is unchanged — still the conviction-sizing denominator.)
 MAX_SIZE_MULT = 3.0            # conviction sizing: a bid grows up to this × the reward min when edge is big AND the forecast σ is tight; 1× (floor) when thin/noisy. Tunable — bigger = more concentration on the best bets, less reward-spread
 SELL_MARKUP_C = 0.02           # minimum take-profit; larger model edges target a larger gain below
 SELL_EDGE_CAPTURE = 0.50       # initially ask for half of the model edge
@@ -107,6 +116,16 @@ def _has_positive_edge(t: dict, *, min_edge: float = MIN_MODEL_EDGE) -> bool:
     return edge is not None and edge >= min_edge - 1e-9
 
 
+def _bid_in_reward_band(t: dict) -> bool:
+    """The passive bid must rest INSIDE the reward band [mid − rewardsMaxSpread, mid], or it earns $0. On a WIDE book
+    `_bid_price` (= min(best_bid, mid − UNDERCUT_C)) sits at the far best_bid, BELOW the band — a resting bid out there
+    qualifies for no reward and just locks the cap (the farmer's only income IS the reward, so an out-of-band bid is
+    dead capital that also crowds out an in-band one). So skip the bucket unless the passive bid lands in-band.
+    rewardsMaxSpread is per-market and carried in cents (temperature = 4.5¢; matches scan.book_mid_competition)."""
+    band = (t.get("max_spread") or 4.5) / 100.0
+    return _bid_price(t) >= t["mid"] - band - 1e-9
+
+
 def _conviction_mult(t: dict) -> float:
     """Position-size multiplier in [1, MAX_SIZE_MULT]: BIGGER when our price edge is large AND the forecast σ is
     tight (high conviction — a tight city / clear day), 1× (the reward floor) when the edge is thin OR the city/day
@@ -125,11 +144,13 @@ def select(targets: list[dict], *, capital_cap: float, max_targets: int, min_lea
     MOST-LIKELY buckets. Then rank by reward/competition score × model edge under the capital cap + max_targets.
     One maker bid each (≥ reward min_size)."""
     cand = [t for t in targets
-            if t.get("entry_eligible", True)                                           # today may be valuation-only context
+            if t.get("station_id") not in SUSPENDED_STATIONS                            # Seoul/Tokyo suspended (marine-cold forecast)
+            and t.get("entry_eligible", True)                                           # today may be valuation-only context
             and (t.get("our_yes_lean") or 0.0) >= min_lean                             # forecast favors it (top-2 floor)
             and t.get("mid") is not None and MID_LO <= t["mid"] <= MID_HI              # in single-leg scoring band
             and _healthy(t)                                                            # real book + sane price
-            and _has_positive_edge(t)]                                                 # model says our bid is >=3¢ cheap
+            and _has_positive_edge(t, min_edge=FARM_MIN_EDGE)                          # ENTRY gate: bid not above our fair (edge≥0); lean≥0.3 still required
+            and _bid_in_reward_band(t)]                                                # passive bid lands IN the reward band (else $0 reward — wide-book bid sits outside it)
     by_event: dict[tuple, list[dict]] = {}                                            # keep the ≤2 most-likely per event
     for t in cand:
         by_event.setdefault((t["city"], t["market_date"]), []).append(t)
@@ -142,8 +163,13 @@ def select(targets: list[dict], *, capital_cap: float, max_targets: int, min_lea
     spent = 0.0
     for t in kept:
         rmin = float(t["min_size"])                                                  # the market's rewardsMinSize
-        size = float(max(round(rmin * size_mult * _conviction_mult(t)), rmin))        # conviction sizing UP, but NEVER below rmin (else the bid earns no reward)
         price = _bid_price(t)                                                         # passive maker bid
+        # user 2026-06-23: rewards = MINIMUM resting size (broad coverage + data, minimal capital) — NOT conviction-sized.
+        size = rmin
+        if price > 0 and size * price < MIN_ORDER_USD - 1e-9:                         # …EXCEPT bump to the $1 platform min when rmin×price can't reach it
+            size = float(math.ceil(MIN_ORDER_USD / price))
+        if price > 0 and size * price > MAX_SIZE_USD:                                  # PER-ORDER $ cap kept (flat-min never reaches it; defensive)
+            size = float(max(rmin, math.floor(MAX_SIZE_USD / price)))
         capital = round(size * price, 2)
         if spent + capital > capital_cap + 1e-9:                                      # over the cap → skip the next (cheaper) one
             continue
@@ -573,13 +599,16 @@ def _place_sells(new_state: dict, to_sell: list[dict], held: dict | None, now_is
                 log.append(f"SELL-FAIL {ent['city']} {ent['bucket']}: {res.detail}")
             continue
         if taker:                                                                # a FAK doesn't rest → leave no sell_order_id
-            # CONSERVATIVELY assume the FAK sold its full `size` (the response carries no fill qty): shrink the
-            # private ceiling so own_max→base → CLOSE next cycle, NEVER a second FORCE clamped to a co-hold-inflated
-            # `cur` (the partial-fill naked short, verify-fix #1). A rare partial/killed FAK leaves a residual that
-            # rides to settlement — the accepted maker-flatten residual risk, never an oversell.
-            ent["held_at_fill"] = round(max(base, ent.get("held_at_fill", size) - size), 2)
-            ent.update(sell_order_id=None, sell_pending=False, sell_price=price, sell_mode="FORCE", sell_size=size, flatten_since=None)
-            log.append(f"FORCE-SELL {ent['city']} {ent['bucket']} (taker) @{price}×{size:.0f} → ceiling {ent['held_at_fill']:.0f}")
+            # Decrement the private ceiling by the FAK's TRUE fill (res.filled = resp makingAmount), NOT the requested
+            # `size`. A partial FAK on a thin book then leaves own_max>0 so the residual stays MANAGED (re-forced/re-
+            # rested next cycle, can still catch a later price rise) instead of being orphaned by a false CLOSE.
+            # FAIL-CLOSED: if the response carried no fill qty (res.filled is None) keep the conservative full-`size`
+            # decrement → own_max→base → CLOSE next cycle (preserves verify-fix #1: never a 2nd FORCE clamped to a
+            # co-hold-inflated cur). Never an oversell either way — `size` is already clamped to own_max above.
+            sold = size if res.filled is None else min(size, max(0.0, res.filled))
+            ent["held_at_fill"] = round(max(base, ent.get("held_at_fill", size) - sold), 2)
+            ent.update(sell_order_id=None, sell_pending=False, sell_price=price, sell_mode="FORCE", sell_size=sold, flatten_since=None)
+            log.append(f"FORCE-SELL {ent['city']} {ent['bucket']} (taker) @{price}×{size:.0f} sold {sold:.0f} → ceiling {ent['held_at_fill']:.0f}")
         else:
             ent.update(sell_order_id=res.order_id, sell_pending=False, sell_price=price,
                        sell_mode=s["mode"], sell_size=size, flatten_since=(0 if s["mode"] == "FLATTEN" else None))
@@ -604,11 +633,19 @@ async def run_cycle(client, stations, now: datetime, *, capital_cap: float, max_
     scanned = await scan(client, stations, now, context_tokens=context_tokens)
     advice_cache, advice_log = await hourly_advice(client, scanned, now)
     scanned = apply_advice(scanned, advice_cache, now)
-    targets = select(scanned, capital_cap=capital_cap, max_targets=max_targets)
+    # capital_cap is the TOTAL-occupied ceiling (user: 占用 ≤ cap): subtract capital already tied up in FILLED
+    # positions so resting bids + filled positions together never exceed it. (Resting bids are reconciled to the
+    # target set every cycle, so resting stays ≤ eff_cap; filled capital only frees when a Stage-2 sell closes.)
+    filled_cap = sum(float(v.get("held_at_fill") or 0.0) * float(v.get("cost") or 0.0)
+                     for v in state.values() if v.get("status") == "FILLED")
+    eff_cap = max(0.0, capital_cap - filled_cap)
+    targets = select(scanned, capital_cap=eff_cap, max_targets=max_targets)
     market_context = {t["token_yes"]: t for t in scanned}                       # valuation for HELD positions; not top-N filtered
-    new_state, to_place, to_cancel, to_sell, log = plan_cycle(targets, held, state, capital_cap=capital_cap,
+    new_state, to_place, to_cancel, to_sell, log = plan_cycle(targets, held, state, capital_cap=eff_cap,
                                                               reprice_drift=reprice_drift, books=books, now=now,
                                                               market_context=market_context)
+    if filled_cap > 0:
+        log.insert(0, f"capital: ${capital_cap:.0f} total − ${filled_cap:.0f} filled = ${eff_cap:.0f} for resting bids")
     if advice_log:
         log.insert(0, advice_log)
     try:

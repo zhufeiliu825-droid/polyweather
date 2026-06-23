@@ -304,7 +304,8 @@ async def scan_city(client: httpx.AsyncClient, stn, now_utc: datetime) -> Scan:
     z = ZoneInfo(stn.timezone)
     mkt_day = now_utc.astimezone(z).date()
     try:
-        curve = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2)
+        curve = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2,
+                                        model=stn.forecast_model)
     except Exception as e:
         log_failure("open_meteo", kind="fetch_failed", detail=str(e),
                     station=stn.station_id, city=stn.city, consequence="skipped")
@@ -610,7 +611,8 @@ async def decide_strike(client: httpx.AsyncClient, stn, scan: "Scan",
 
     prev_runs, late_peak_utc = {}, None                # multi-run spread (FREE) + its late-bound peak time
     try:
-        prev_runs = await fetch_previous_runs(client, stn.latitude, stn.longitude, stn.timezone, mkt_day)
+        prev_runs = await fetch_previous_runs(client, stn.latitude, stn.longitude, stn.timezone, mkt_day,
+                                              model=stn.forecast_model)
         if prev_runs.get("peak_time_max"):
             hh, mm = (int(x) for x in prev_runs["peak_time_max"].split(":"))
             late_peak_utc = datetime.combine(mkt_day, time(hh, mm), tzinfo=z).astimezone(UTC)
@@ -620,7 +622,8 @@ async def decide_strike(client: httpx.AsyncClient, stn, scan: "Scan",
     m15_peak_local = None
     if STRIKE_USE_MINUTELY15:
         try:
-            m15 = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2)
+            m15 = await fetch_minutely_15(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2,
+                                          model=stn.forecast_model)
             day = [(dt, tp) for dt, tp in m15 if dt.date() == mkt_day]
             if day:
                 m15_peak_local = max(day, key=lambda x: x[1])[0].strftime("%H:%M")
@@ -668,7 +671,8 @@ async def snapshot_city(client: httpx.AsyncClient, stn, scan: "Scan", now_utc: d
     """Fetch the hourly-met forecast and append ONE compact snapshot {issue_utc, peak_C, peak_local,
     met_at_peak} for `scan.mkt_day`. Accumulated hourly → the day's peak-convergence fan (read by the strike +
     decision LLMs). Returns the record (or None if no usable market-day forecast). NEVER raises (caller logs)."""
-    met = await fetch_hourly_met(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2)
+    met = await fetch_hourly_met(client, stn.latitude, stn.longitude, stn.timezone, forecast_days=2,
+                                 model=stn.forecast_model)
     day = [h for h in met if h["t"].date() == scan.mkt_day]
     if not day:
         return None

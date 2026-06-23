@@ -28,6 +28,8 @@ class Station(BaseModel):
     report_interval_min: int | None = None   # METAR cadence (30 or 60); info only
     tier: str = "breadth"        # watchlist | breadth
     verified: bool = False       # passed station+unit+tz verification
+    forecast_model: str | None = None   # pinned OpenMeteo model (&models=); None ⇒ best_match. Per-city best
+                                        # from the 365d daily-max + 90d curve-fit scan (maintain/model_city_scan.py)
 
 
 @lru_cache(maxsize=1)

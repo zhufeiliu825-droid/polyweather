@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from polyweather.realized.feature_store import DATA_DIR
+from polyweather.forecast.open_meteo import _forecast_endpoint   # keyed customer-api when OPEN_METEO_API_KEY set, else free
 from polyweather.stations import load_stations
 
 UTC = timezone.utc
@@ -62,6 +63,7 @@ CITIES: dict[str, dict] = {
              "lat": 22.302, "lon": 114.174, "series": "11312"},
     "EDDM": {"city": "Munich", "feed": "dwd", "dwd_stn": "01262"},     # DWD 10-min 0.1C, no key (München-Flughafen)
     "EFHK": {"city": "Helsinki", "feed": "fmi", "fmi_id": "100968"},   # FMI WFS 10-min 0.1C, no key (Vantaa)
+    "LFPB": {"city": "Paris", "feed": "meteofrance", "mf_stn": "95088001"},  # MF DPObs v2 6-min 0.1C, needs METEOFRANCE_API_KEY (Le Bourget = WMO 07150)
     # Busan RKPK: omitted — Gimhae is NOT among amos.php's 7 airports, so no public minute feed exists.
 }
 
@@ -210,15 +212,56 @@ async def feed_fmi(client: httpx.AsyncClient, cfg: dict, today_local: date, tz: 
     return out
 
 
-FEEDS = {"amedas": feed_amedas, "amos": feed_amos, "hko": feed_hko, "dwd": feed_dwd, "fmi": feed_fmi}
+async def feed_meteofrance(client: httpx.AsyncClient, cfg: dict, today_local: date, tz: ZoneInfo) -> list[tuple] | None:
+    """Paris (LFPB): Meteo-France DPObs *v2* 6-min infra-hourly obs for Id_station 95088001 (Paris-Le Bourget =
+    WMO 07150 = the resolution station). Needs free env METEOFRANCE_API_KEY — subscribe 'Observation data (DPObs)'
+    to your application on portail-api.meteofrance.fr; auth = apikey header. NB: this endpoint returns only the
+    LATEST single 6-min obs per call (not the day's series) — running-max must be accumulated across polls.
+    DPObs 't' is in KELVIN. Returns None if unset/error."""
+    key = os.getenv("METEOFRANCE_API_KEY", "").strip()
+    if not key:
+        return None
+    try:
+        r = await client.get(
+            "https://public-api.meteofrance.fr/public/DPObs/v2/station/infrahoraire-6m",
+            params={"id_station": cfg["mf_stn"], "format": "json"},
+            headers={"apikey": key, "Accept": "application/json"}, timeout=20)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    except Exception:
+        return None
+    rows = data if isinstance(data, list) else (data.get("data") or data.get("features") or [])
+    out = []
+    for o in rows:
+        rec = o.get("properties", o) if isinstance(o, dict) else {}
+        t = rec.get("t", rec.get("temperature"))
+        vt = rec.get("validity_time") or rec.get("reference_time") or rec.get("time")
+        if t is None or vt is None:
+            continue
+        try:
+            tv = float(t)
+            tc = tv - 273.15 if tv > 100 else tv          # DPObs 't' is Kelvin; guard if already C
+            dtu = datetime.fromisoformat(str(vt).replace("Z", "+00:00")).astimezone(UTC)
+        except (ValueError, TypeError):
+            continue
+        if dtu.astimezone(tz).date() == today_local:
+            out.append((dtu, tc))
+    return out
+
+
+FEEDS = {"amedas": feed_amedas, "amos": feed_amos, "hko": feed_hko, "dwd": feed_dwd, "fmi": feed_fmi,
+         "meteofrance": feed_meteofrance}
 
 
 # ---------------------------------------------------------------- forecast curve + nowcast distribution
-async def om_curve(client: httpx.AsyncClient, lat: float, lon: float, tzname: str) -> list[tuple]:
+async def om_curve(client: httpx.AsyncClient, lat: float, lon: float, tzname: str,
+                   model: str | None = None) -> list[tuple]:
     try:
-        j = (await client.get("https://api.open-meteo.com/v1/forecast", params={
-            "latitude": lat, "longitude": lon, "hourly": "temperature_2m",
-            "past_days": 1, "forecast_days": 1, "timezone": tzname}, timeout=20)).json()
+        url, auth = _forecast_endpoint()                   # paid customer-api + apikey when OPEN_METEO_API_KEY set, else free
+        j = (await client.get(url, params={**auth, "latitude": lat, "longitude": lon,
+            "hourly": "temperature_2m", "past_days": 1, "forecast_days": 1, "timezone": tzname,
+            **({"models": model} if model else {})}, timeout=20)).json()
         return [(datetime.fromisoformat(t), tp) for t, tp in
                 zip(j["hourly"]["time"], j["hourly"]["temperature_2m"]) if tp is not None]
     except Exception:
@@ -330,7 +373,8 @@ async def observe(client: httpx.AsyncClient, icao: str, cfg: dict, stn, now: dat
     running_max = max(t for _, t in series)
     latest_utc, latest_t = series[-1]
 
-    curve = await om_curve(client, stn.latitude, stn.longitude, stn.timezone)
+    curve = await om_curve(client, stn.latitude, stn.longitude, stn.timezone,
+                           getattr(stn, "forecast_model", None))
     today_curve = [(t, tp) for t, tp in curve if t.date() == today_local]
     fut = [tp for t, tp in today_curve if t.replace(tzinfo=None) > now_local]
     om_rem = max(fut) if fut else None

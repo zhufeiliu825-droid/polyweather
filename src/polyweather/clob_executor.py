@@ -63,6 +63,9 @@ class OrderResult:
     gone: bool = False               # (cancel only) ok=True because the order was ALREADY TERMINAL (matched / already
     #                                  cancelled), NOT a clean cancel of a live OPEN order → the caller must NOT act on
     #                                  a possibly-filled order with stale positions (no resell/replace; re-confirm next cycle).
+    filled: float | None = None      # (taker FAK only) SHARES matched, parsed from the post response — None when the
+    #                                  response didn't carry a parsable amount (callers treat ok-but-None as AMBIGUOUS,
+    #                                  never as a confirmed fill). run_cluster._taker_result reads this.
 
 
 def _snap_maker(price: float, tick: float = 0.01) -> float:
@@ -83,6 +86,7 @@ def _snap_ask(price: float, tick: float = 0.01) -> float:
 
 
 def _log(rec: dict) -> None:
+    ORDER_LOG.parent.mkdir(parents=True, exist_ok=True)     # fresh clone has no data/ yet — never lose the audit row
     with ORDER_LOG.open("a") as f:
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
@@ -159,6 +163,27 @@ def _order_id(resp) -> str | None:
     return resp.get("orderID") or resp.get("order_id") or resp.get("orderId") or resp.get("id")
 
 
+def _taker_filled(resp, is_sell: bool) -> float | None:
+    """SHARES matched by a FAK, from the post response. CLOB semantics: a BUY makes collateral and TAKES
+    outcome tokens (shares = takingAmount); a SELL makes outcome tokens (shares = makingAmount). Tolerant of
+    key naming; None when no parsable amount — callers must treat that as UNCONFIRMED (ambiguous), never as
+    a fill. VERIFY the real keys against the installed client on the first live FAK."""
+    if not isinstance(resp, dict):
+        return None
+    keys = (("makingAmount", "making_amount") if is_sell else ("takingAmount", "taking_amount"))
+    for k in (*keys, "sizeMatched", "size_matched", "matchedAmount"):
+        v = resp.get(k)
+        if v in (None, ""):
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f >= 0:
+            return f
+    return None
+
+
 def _validate(d: Decision) -> str | None:
     if d.action != "BET":
         return f"action={d.action} (only BET is placed)"
@@ -166,8 +191,8 @@ def _validate(d: Decision) -> str | None:
         return f"side={d.side} (only BUY_YES / SELL_YES)"
     if d.order_type not in ("maker", "taker"):
         return f"order_type={d.order_type} (only maker / taker)"
-    if d.order_type == "taker" and d.side != "SELL_YES":   # taker is ONLY the 关门时间 SELL force-flatten
-        return f"order_type=taker only for SELL_YES force-flatten (got {d.side})"
+    # taker is allowed BOTH ways: SELL = the farmer's 关门时间 force-flatten; BUY = the cluster/snipe FAK entry
+    # (the BUY price ceiling below still applies — a taker BUY crosses at the ask, so the ask must clear it).
     if not d.token_yes:
         return "missing token_yes"
     # a resting maker is ≥ the tick floor; a BUY bid stays under the 0.85 ceiling, a SELL ask may price high
@@ -205,9 +230,13 @@ def place_from_decision(d: Decision, *, now_iso: str, ttl_min: int | None = MAKE
         _log({**base, "status": "REJECTED", "reason": err})
         return OrderResult(False, _dry_run(), f"rejected: {err}")
 
+    # Snap direction: a MAKER never crosses (BUY bid DOWN, SELL ask UP); a TAKER must stay marketable
+    # (BUY limit UP ≥ the ask, SELL limit DOWN ≤ the bid).
+    snap_up = (is_sell != is_taker)                       # maker SELL or taker BUY → UP; maker BUY or taker SELL → DOWN
+
     if _dry_run():
         grid = 0.001 if (d.maker_price or 1.0) < 0.04 else 0.01   # DRY estimate grid (sub-0.04 buckets ≈ 0.001 tick)
-        price = (_snap_ask if (is_sell and not is_taker) else _snap_maker)(d.maker_price, grid)   # maker ask snaps UP; taker SELL / any BUY snaps DOWN (≤ bid → marketable)
+        price = (_snap_ask if snap_up else _snap_maker)(d.maker_price, grid)
         notional = round(shares * price, 2)              # $ value = shares × price (varies with price)
         _log({**base, "price": price, "notional_usd": notional, "status": "DRY_RUN"})
         return OrderResult(True, True,
@@ -224,7 +253,7 @@ def place_from_decision(d: Decision, *, now_iso: str, ttl_min: int | None = MAKE
     # Snap to the grid: a BUY bid DOWN (≤ intended, below mid), a SELL ask UP (≥ intended, above mid).
     # post_only also enforces maker — never crosses.
     side_enum = Side.SELL if is_sell else Side.BUY
-    price = (_snap_ask if (is_sell and not is_taker) else _snap_maker)(d.maker_price, tick)   # taker SELL snaps DOWN (≤ bid → crosses); maker ask snaps UP
+    price = (_snap_ask if snap_up else _snap_maker)(d.maker_price, tick)   # maker: never crosses; taker: stays marketable
     if not (PRICE_FLOOR <= price < 1.0):                 # snapped off the postable range → no order
         _log({**base, "price": price, "status": "REJECTED", "reason": f"snapped {price} off [{PRICE_FLOOR}, 1)"})
         return OrderResult(False, False, f"snapped {price} off postable range — no order")
@@ -264,8 +293,11 @@ def place_from_decision(d: Decision, *, now_iso: str, ttl_min: int | None = MAKE
         if not resp or resp_err:
             _log({**base, "price": price, "shares": shares, "status": "ERROR", "reason": f"taker resp: {resp!r}"})
             return OrderResult(False, False, f"taker FAK failed: {resp!r}", ambiguous=True)
-        _log({**base, "price": price, "shares": shares, "status": "LIVE", "resp": resp, "order_id": oid})
-        return OrderResult(True, False, f"posted {otype} {oid or '(filled, no-rest)'}", order_id=oid)
+        matched = _taker_filled(resp, is_sell)
+        _log({**base, "price": price, "shares": shares, "status": "LIVE", "resp": resp, "order_id": oid,
+              "filled": matched})
+        return OrderResult(True, False, f"posted {otype} {oid or '(filled, no-rest)'}", order_id=oid,
+                           filled=matched)
     if not resp or resp_err or not oid:
         # NEVER claim success without a confirmed order id — but the order MAY be live (unrecognized
         # id key / partial response), so flag AMBIGUOUS so the daemon blocks re-placement (audit H2).

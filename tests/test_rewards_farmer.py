@@ -819,15 +819,18 @@ def test_executor_taker_sell_dry_ok(monkeypatch):
     assert res.ok and res.dry_run and "FAK-taker" in res.detail
 
 
-def test_executor_rejects_taker_buy():
+def test_executor_allows_taker_buy(monkeypatch, tmp_path):
+    # taker BUY = the cluster/snipe FAK entry (allowed since 2026-07-04; the farmer itself never sends one)
     from datetime import date as _date
 
     from polyweather.models import Comparator, Decision
+    monkeypatch.setenv("POLY_DRY_RUN", "1")
+    monkeypatch.setattr(ex, "ORDER_LOG", tmp_path / "orders.jsonl")
     d = Decision(city="seoul", station_id="RKSI", local_date=_date(2026, 6, 18), label="==27C",
                  comparator=Comparator.EQ, threshold=27, token_yes="0xtok", action="BET", side="BUY_YES",
                  order_type="taker", confidence=None, market_yes=0.30, maker_price=0.30, size_shares=50.0, health_ok=True)
     res = ex.place_from_decision(d, now_iso="t")
-    assert not res.ok and "only for SELL_YES" in res.detail
+    assert res.ok and res.dry_run and "FAK-taker" in res.detail
 
 
 # ---- clob_executor.cancel_order: GONE (matched/not-found) → ok=True (no infinite retry); transient → ok=False ----

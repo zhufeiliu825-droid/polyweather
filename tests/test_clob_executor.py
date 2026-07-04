@@ -323,11 +323,32 @@ def test_place_dry_sell_label(tmp_path, monkeypatch):
     assert r.ok and r.dry_run and "SELL" in r.detail
 
 
-# ---- TAKER force-flatten (关门时间 only): FAK that CROSSES the bid, snapped DOWN, post_only OFF ----
+# ---- TAKER: SELL = the farmer's 关门时间 force-flatten; BUY = the cluster/snipe FAK entry ----
 
-def test_validate_rejects_taker_buy():
-    assert "only for SELL_YES" in (ex._validate(_bet(side="BUY_YES", order_type="taker")) or "")
-    assert ex._validate(_bet(side="SELL_YES", order_type="taker", maker_price=0.55)) is None     # taker SELL allowed
+def test_validate_allows_taker_both_sides():
+    assert ex._validate(_bet(side="BUY_YES", order_type="taker")) is None            # cluster/snipe FAK entry
+    assert ex._validate(_bet(side="SELL_YES", order_type="taker", maker_price=0.55)) is None     # farmer force-flatten
+    assert "0.85" in (ex._validate(_bet(side="BUY_YES", order_type="taker", maker_price=0.86)) or "")  # ceiling still binds
+
+
+def test_place_live_taker_buy_is_fak_snapped_up(tmp_path, monkeypatch):
+    from py_clob_client_v2 import OrderType, Side
+    fake = _FakePlace(post={"orderID": "b1", "takingAmount": "10", "makingAmount": "8.4"})
+    _live(monkeypatch, tmp_path, fake)
+    r = ex.place_from_decision(_bet(side="BUY_YES", order_type="taker", maker_price=0.831), now_iso="t", ttl_min=None)
+    assert r.ok and r.order_id == "b1" and "FAK-taker" in r.detail
+    assert fake.order_type == OrderType.FAK and fake.post_only is False              # crosses → NOT post_only
+    assert fake.posted_side == Side.BUY and fake.expiration == 0
+    assert abs(fake.posted_price - 0.84) < 1e-9                                      # taker BUY snaps UP (≥ ask → marketable)
+    assert r.filled == 10.0                                                          # BUY fill = takingAmount (shares received)
+
+
+def test_taker_filled_parses_by_side():
+    resp = {"takingAmount": "10", "makingAmount": "8.4"}
+    assert ex._taker_filled(resp, is_sell=False) == 10.0                             # BUY: shares = takingAmount
+    assert ex._taker_filled(resp, is_sell=True) == 8.4                               # SELL: shares = makingAmount
+    assert ex._taker_filled({"status": "matched"}, is_sell=False) is None            # no parsable amount → UNCONFIRMED
+    assert ex._taker_filled({"takingAmount": "oops"}, is_sell=False) is None
 
 
 def test_place_live_taker_is_fak_crosses(tmp_path, monkeypatch):

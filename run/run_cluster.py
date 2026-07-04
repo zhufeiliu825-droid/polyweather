@@ -844,7 +844,8 @@ def cycle(total_cap, force_dry=False, show_storage=False):
         lead_ramp = 1.0
         for _h, _m in LEAD_RAMP:
             if _hrs > _h:
-                lead_ramp = _m; break
+                lead_ramp = _m
+                break
         conf = sel.get("conf_base", 1.0) * lead_ramp
         log.append(f"  {name} {sel['day']}: conf {conf:.2f} (edge/boundary {sel.get('conf_base', 1.0):.2f} × lead×{lead_ramp:.2f}, "
                    f"{_hrs:.0f}h to peak" + (", MARKET-DISAGREE ½" if sel.get("disagree") else "") + ")")

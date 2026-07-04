@@ -15,6 +15,7 @@ class _Stn:
     latitude = 51.5
     longitude = -0.1
     timezone = "Europe/London"
+    forecast_model = None            # snapshot_city passes stn.forecast_model since the 2026-06-22 model pinning
 
 
 def _scan():

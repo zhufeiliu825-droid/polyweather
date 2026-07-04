@@ -2,6 +2,29 @@
 
 _Written 2026-06-18; synchronized 2026-06-19 by Codex after the hourly Farmer LLM rollout._
 
+> **Claude 2026-07-04 — market study, executor taker-BUY fix, LOCKED-MAX SNIPER (NOT live until the user
+> deploys):**
+> 1. **Public-API market study** (~1,000 settled June events × 11 buckets × hourly CLOB prices, all 32 cities):
+>    the market is well calibrated (no longshot bias); buying the Open-Meteo forecast bucket LOSES 5-12% net
+>    (independently confirms the 2026-06 our_p audit); the ONE fee-surviving anomaly is the **afternoon
+>    convergence lag** — the eventual winner still trades ~0.59 at 15:00 local / ~0.71 at 16:00 / ~0.83 at
+>    17:00. Fee regime since 2026-04: `weather_fees` = taker-only 5% × min(p,1−p), makers 0 + 25% rebate.
+>    NOTE: CLOB `prices-history` only retains ~30 days — the odds_logger really is irreplaceable.
+> 2. **Executor fix (behavior change — affects the CLUSTER on its next restart):** `_validate` REJECTED
+>    `order_type=taker` BUYs and `OrderResult` had no `.filled`, so **all three of run_cluster's taker call
+>    sites (entry past-window, escalation, lotto) could never place** — rejected at validate, then
+>    `_taker_result` would raise `AttributeError` reading `res.filled`. Fixed: taker BUY allowed (BUY price
+>    ceiling still binds), taker BUY price snaps UP (marketable), `OrderResult.filled` parsed from the FAK
+>    response (BUY = takingAmount, SELL = makingAmount; unparsable → None → callers treat as AMBIGUOUS).
+>    **Check `data/cluster_orders.jsonl` for REJECTED/AttributeError rows to see what the cluster actually
+>    did since 2026-06-23.**
+> 3. **New bot `run/run_snipe.py`** (locked-max sniper; cluster's isolation pattern: own state/journal/flock,
+>    `.env.snipe` wallet, DRY default, crash-safe PENDING→AMBIGUOUS reconcile, per-event $25 / daily $150
+>    caps, 2-cycle lock confirmation, GE-already-won shortcut). Deploy = `com.polyweather.snipe.plist` +
+>    `run_snipe.sh` (exports per-process `POLY_PRICE_CEILING=0.92`). Tests: `tests/test_snipe.py`.
+>    Recommended first step: run the DRY loop a few days — it journals WOULD-BUY rows with real sizing
+>    (a forward paper track) → then flip `POLY_DRY_RUN=0` in `.env.snipe` small.
+
 > **LIVE now:** the Farmer makes one batched `gpt-5.4-mini` calibration call per hour, caches an event-level
 > `actual_max - Open-Meteo_peak` adjustment plus participate/confidence/reason, and reuses it in every 5-minute
 > cycle. The LLM changes adjusted peak, lean, fair and ranking but never calls the executor. Advice expires after

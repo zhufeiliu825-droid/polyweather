@@ -11,6 +11,12 @@ imported, never edited here) and `maintain/` (maintainer tooling). Dead code is 
 - `run_once.py` — one-city end-to-end (DRY) for spot-checking.
 - `run_rewards.py` — five-minute reward Farmer; one batched hourly LLM calibration is cached and reused by
   deterministic selection/execution, with station/regime calibration fallback.
+- `run_snipe.py` — LOCKED-MAX SNIPER: once a city's daily max is physically locked (past peak + fresh METAR +
+  the forecast can't beat the realized max, confirmed 2 cycles), taker-buys the winning bucket at ask ≤ 0.90
+  and holds to settle. Motivated by the 2026-07 public-API study: the eventual winner still trades ~0.71 at
+  16:00 local / ~0.83 at 17:00 — the one edge that survives fees (forecast-bucket buying does NOT). Isolated
+  state/journal/lock (`data/snipe_*`), `.env.snipe` wallet, DRY by default; the DRY loop journals WOULD-BUY
+  rows → a forward paper track with real sizing. `POLY_DRY_RUN=1 uv run python run/run_snipe.py --once`.
 - `telegram_digest.py` — the user-format digest renderer (used by run_daemon).
 - `deploy/` — launchd: `run.sh` (daemon), `run_odds.sh` (odds logger), `maintenance/maintenance.sh`
   (backup / logrotate / settle), and the `com.polyweather.*.plist` agents.

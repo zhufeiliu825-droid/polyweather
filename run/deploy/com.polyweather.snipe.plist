@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polyweather LOCKED-MAX SNIPER — macOS launchd agent. DRY unless .env.snipe sets POLY_DRY_RUN=0.
+  Buys the already-decided temperature bucket while the market is still repricing it (the measured
+  afternoon convergence lag); holds to settlement; never sells.
+      cp deploy/com.polyweather.snipe.plist ~/Library/LaunchAgents/
+      launchctl load  ~/Library/LaunchAgents/com.polyweather.snipe.plist
+      launchctl unload ~/Library/LaunchAgents/com.polyweather.snipe.plist
+  Logs: logs/snipe.out.log / logs/snipe.err.log.  State: data/snipe_state.json; audit: data/snipe_orders.jsonl.
+  EDIT the absolute paths below if the repo is not at /Users/wekoiuk/polyweather.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyweather.snipe</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wekoiuk/polyweather/run/deploy/run_snipe.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wekoiuk/polyweather</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/snipe.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/wekoiuk/polyweather/logs/snipe.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
